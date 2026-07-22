@@ -1,0 +1,142 @@
+// RentReceipt — data model
+// All money is stored as INTEGER ngwee (1 Kwacha = 100 ngwee) to avoid floats.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// The single landlord account (the only user of the app).
+model Landlord {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+/// Singleton row holding property + email/SMTP settings used on receipts.
+model Setting {
+  id              Int      @id @default(1)
+  propertyName    String   @default("My Property")
+  propertyAddress String   @default("")
+  landlordEmail   String   @default("")
+  // SMTP overrides (fall back to .env when blank). Password stored server-side only.
+  smtpHost        String   @default("")
+  smtpPort        Int      @default(465)
+  smtpSecure      Boolean  @default(true)
+  smtpUser        String   @default("")
+  smtpPass        String   @default("")
+  smtpFromName    String   @default("RentReceipt")
+  smtpFromEmail   String   @default("")
+  updatedAt       DateTime @updatedAt
+}
+
+/// A physical room (1..24). Occupancy is derived from the current tenancy.
+model Room {
+  number      Int       @id // 1..24
+  defaultRent Int       @default(0) // ngwee
+  tenancies   Tenancy[]
+}
+
+model Tenant {
+  id        Int       @id @default(autoincrement())
+  name      String
+  phone     String    @default("")
+  email     String    @default("")
+  notes     String    @default("")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  tenancies Tenancy[]
+}
+
+/// A tenant's stay in a specific bed of a room. moveOutDate == null means current.
+/// Each room has two beds, "A" and "B" (24 rooms x 2 = 48 beds).
+model Tenancy {
+  id          Int       @id @default(autoincrement())
+  roomNumber  Int
+  bed         String    @default("A") // "A" | "B"
+  tenantId    Int
+  moveInDate  DateTime
+  moveOutDate DateTime?
+  archivedAt  DateTime? // set when a moved-out tenancy is archived (hidden from lists)
+  monthlyRent Int // ngwee, copied from room default, editable per tenancy
+  createdAt   DateTime  @default(now())
+
+  room     Room      @relation(fields: [roomNumber], references: [number])
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  payments Payment[]
+
+  @@index([roomNumber, bed])
+  @@index([tenantId])
+}
+
+model Payment {
+  id         Int      @id @default(autoincrement())
+  tenancyId  Int
+  amount     Int // ngwee
+  datePaid   DateTime @default(now())
+  method     String   @default("cash") // cash | mobile_money | bank
+  createdAt  DateTime @default(now())
+
+  tenancy Tenancy         @relation(fields: [tenancyId], references: [id])
+  periods PaymentPeriod[]
+  receipt Receipt?
+
+  @@index([tenancyId])
+}
+
+/// How a payment is applied across one or more months.
+/// expectedRent is snapshotted so later rent changes never corrupt history.
+model PaymentPeriod {
+  id            Int @id @default(autoincrement())
+  paymentId     Int
+  month         Int // 1..12
+  year          Int
+  amountApplied Int // ngwee
+  expectedRent  Int // ngwee snapshot
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([year, month])
+}
+
+model Receipt {
+  id            Int       @id @default(autoincrement())
+  paymentId     Int       @unique
+  receiptNumber String    @unique // RCT-YYYY-NNNN
+  pdfPath       String
+  emailedAt     DateTime?
+  emailStatus   String    @default("none") // none | pending | sent | failed
+  createdAt     DateTime  @default(now())
+
+  payment    Payment      @relation(fields: [paymentId], references: [id])
+  emailQueue EmailQueue[]
+}
+
+/// Atomic sequential receipt numbering, per year.
+model ReceiptCounter {
+  year    Int @id
+  lastSeq Int @default(0)
+}
+
+/// Outbox for receipt emails; retried by a background worker.
+model EmailQueue {
+  id          Int       @id @default(autoincrement())
+  receiptId   Int
+  status      String    @default("pending") // pending | sent | failed
+  attempts    Int       @default(0)
+  lastError   String    @default("")
+  nextRetryAt DateTime  @default(now())
+  sentAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  receipt Receipt @relation(fields: [receiptId], references: [id])
+
+  @@index([status, nextRetryAt])
+}

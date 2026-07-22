@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-family: 'Instrument Sans', system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  /* Large, thumb-friendly buttons (min 44px touch targets) */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-5 font-semibold
+           transition active:scale-[.99] disabled:opacity-50 disabled:pointer-events-none;
+    min-height: 52px;
+  }
+  .btn-primary {
+    @apply btn bg-brand text-white hover:bg-brand-dark shadow-cta;
+  }
+  .btn-secondary {
+    @apply btn bg-white text-ink border border-line hover:bg-surface;
+  }
+  .btn-outline {
+    @apply btn bg-white text-brand border border-brand hover:bg-brand-light;
+  }
+  .btn-danger {
+    @apply btn bg-white text-due-text border border-due-border hover:bg-due-bg;
+  }
+  .card {
+    @apply bg-white rounded-2xl border border-line;
+  }
+  .field-input {
+    @apply w-full rounded-xl border-[1.5px] border-[#D6DCD4] px-3 text-base text-ink
+           focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand;
+    min-height: 52px;
+  }
+  .field-label {
+    @apply block text-sm font-semibold text-ink mb-1.5;
+  }
+}
