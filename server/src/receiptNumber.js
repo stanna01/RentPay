@@ -9,16 +9,37 @@ export function formatReceiptNumber(year, seq) {
 }
 
 /**
- * Reserve the next receipt number for the given year.
- * Pass a Prisma transaction client (tx) so it participates in the caller's
- * transaction; falls back to the shared client if none is given.
+ * Reserve the next receipt number for the given year. Must be called inside a
+ * Prisma interactive transaction (tx) so the INSERT and the LAST_INSERT_ID()
+ * read run on the same connection.
+ *
+ * MySQL has no RETURNING, so we use the classic atomic-counter idiom:
+ * LAST_INSERT_ID(expr) both stores `expr` and sets the session value, which we
+ * then read back. This is fully atomic and correct under concurrent callers.
  */
+/**
+ * Ensure the counter row for a year exists. Call this ONCE, outside the payment
+ * transaction, before nextReceiptNumber. Keeping the INSERT out of the hot path
+ * means concurrent nextReceiptNumber calls only ever UPDATE — a single clean
+ * row lock, so no InnoDB deadlocks. Mixing INSERT and UPDATE on the same key
+ * across concurrent transactions is what deadlocks.
+ */
+export async function ensureReceiptCounter(client, year = new Date().getFullYear()) {
+  await client.$executeRawUnsafe(
+    'INSERT IGNORE INTO `ReceiptCounter` (`year`, `lastSeq`) VALUES (?, 0)',
+    year
+  );
+}
+
 export async function nextReceiptNumber(tx, year = new Date().getFullYear()) {
-  // Upsert-then-increment guarantees the counter row exists and advances by 1.
-  const counter = await tx.receiptCounter.upsert({
-    where: { year },
-    create: { year, lastSeq: 1 },
-    update: { lastSeq: { increment: 1 } },
-  });
-  return { year, seq: counter.lastSeq, receiptNumber: formatReceiptNumber(year, counter.lastSeq) };
+  // UPDATE-only: bump the counter and read the new value back on this
+  // connection via LAST_INSERT_ID (MySQL has no RETURNING). The row is
+  // guaranteed to exist because the caller ran ensureReceiptCounter first.
+  await tx.$executeRawUnsafe(
+    'UPDATE `ReceiptCounter` SET `lastSeq` = LAST_INSERT_ID(`lastSeq` + 1) WHERE `year` = ?',
+    year
+  );
+  const rows = await tx.$queryRawUnsafe('SELECT LAST_INSERT_ID() AS seq');
+  const seq = Number(rows[0].seq);
+  return { year, seq, receiptNumber: formatReceiptNumber(year, seq) };
 }

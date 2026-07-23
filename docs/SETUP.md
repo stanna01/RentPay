@@ -10,8 +10,9 @@ computer.
   node --version
   ```
 - **npm 10+** (ships with Node).
-- That's it — the database is **SQLite** (a single file), so there is nothing
-  else to install.
+- A **MySQL 8 database**. You don't need to install one locally — use a free/managed
+  cloud MySQL (e.g. **Railway** or **Aiven**) and copy its connection string. The
+  same database can serve both local development and production.
 
 ## 2. Install
 
@@ -36,7 +37,7 @@ Open `server/.env` and set at least:
 
 | Variable            | What it is                                                        |
 | ------------------- | ----------------------------------------------------------------- |
-| `DATABASE_URL`      | Leave as `file:./prisma/dev.db` for local development.            |
+| `DATABASE_URL`      | Your MySQL connection string: `mysql://user:pass@host:3306/db`.  |
 | `JWT_SECRET`        | Any long random string. Generate one: `openssl rand -base64 48`. |
 | `LANDLORD_EMAIL`    | The email you'll log in with.                                     |
 | `LANDLORD_PASSWORD` | The initial password (change it later in Settings).               |
@@ -47,16 +48,20 @@ Email (`SMTP_*`) can be left blank for now — see
 ## 4. Create the database + seed data
 
 ```bash
-npm run db:migrate     # creates the SQLite database and tables
-npm run db:seed        # creates the landlord, 24 rooms, and demo data
+npm run db:migrate     # creates the MySQL tables
+npm run db:seed        # creates the landlord + 24 rooms (clean start)
 ```
 
 `db:seed` creates:
 - your landlord login (from `.env`),
 - **24 rooms (48 beds, A/B per room)**,
-- a full set of **demo tenants** across most beds — with payment history,
-  receipts and PDFs, and a few beds left vacant / partial / due — so the room
-  board shows realistic colours immediately.
+- and nothing else — a clean database ready for real tenants.
+
+> Want sample data for testing? Seed with demo tenants/payments/receipts:
+> ```bash
+> SEED_DEMO=1 npm run db:seed
+> ```
+> Never use `SEED_DEMO=1` against a production database.
 
 > **Reset everything** (drops the DB, re-migrates, re-seeds):
 > ```bash

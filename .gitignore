@@ -18,10 +18,6 @@ dist/
 *.sqlite
 *.sqlite3
 
-# Generated receipt PDFs
-server/storage/receipts/*
-!server/storage/receipts/.gitkeep
-
 # Logs
 *.log
 npm-debug.log*

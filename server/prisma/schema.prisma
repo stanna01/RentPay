@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
@@ -110,7 +110,7 @@ model Receipt {
   id            Int       @id @default(autoincrement())
   paymentId     Int       @unique
   receiptNumber String    @unique // RCT-YYYY-NNNN
-  pdfPath       String
+  pdf           Bytes?    @db.LongBlob // the immutable receipt PDF, stored in the DB
   emailedAt     DateTime?
   emailStatus   String    @default("none") // none | pending | sent | failed
   createdAt     DateTime  @default(now())

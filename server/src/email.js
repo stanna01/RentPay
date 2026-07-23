@@ -2,8 +2,6 @@
 // SMTP config comes from the DB Setting row, falling back to environment vars.
 
 import nodemailer from 'nodemailer';
-import { promises as fs } from 'fs';
-import path from 'path';
 import { prisma, ensureSettings } from './db.js';
 import { formatKwacha } from './money.js';
 import { decryptSecret } from './crypto.js';
@@ -104,7 +102,7 @@ export async function sendReceiptEmail(receiptId) {
   const transport = buildTransport(cfg);
   const settings = await ensureSettings();
 
-  const pdf = await fs.readFile(receipt.pdfPath);
+  if (!receipt.pdf) throw new Error('Receipt PDF is missing.');
   const amount = formatKwacha(receipt.payment.amount);
 
   await transport.sendMail({
@@ -117,7 +115,11 @@ export async function sendReceiptEmail(receiptId) {
       `Your receipt (${receipt.receiptNumber}) is attached.\n\n` +
       `Regards,\n${settings.propertyName}`,
     attachments: [
-      { filename: `${receipt.receiptNumber}.pdf`, content: pdf, contentType: 'application/pdf' },
+      {
+        filename: `${receipt.receiptNumber}.pdf`,
+        content: Buffer.from(receipt.pdf),
+        contentType: 'application/pdf',
+      },
     ],
   });
 

@@ -5,8 +5,8 @@
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-import { nextReceiptNumber } from '../src/receiptNumber.js';
-import { generateReceiptPdf } from '../src/pdf.js';
+import { nextReceiptNumber, ensureReceiptCounter } from '../src/receiptNumber.js';
+import { buildReceiptPdf } from '../src/pdf.js';
 
 const prisma = new PrismaClient();
 
@@ -69,25 +69,29 @@ async function makePayment(tenancy, tenant, settings, { amount, month, year, dat
   const periodRows = [
     { month, year, amountApplied: amount, expectedRent: tenancy.monthlyRent },
   ];
-  const result = await prisma.$transaction(async (tx) => {
-    const { receiptNumber } = await nextReceiptNumber(tx, year);
-    const payment = await tx.payment.create({
-      data: {
-        tenancyId: tenancy.id,
-        amount,
-        datePaid,
-        method: 'cash',
-        periods: { create: periodRows },
-      },
-    });
-    const receipt = await tx.receipt.create({
-      data: { paymentId: payment.id, receiptNumber, pdfPath: '', emailStatus: 'none' },
-    });
-    return { payment, receipt, receiptNumber };
-  });
+  await ensureReceiptCounter(prisma, year);
+  const result = await prisma.$transaction(
+    async (tx) => {
+      const { receiptNumber } = await nextReceiptNumber(tx, year);
+      const payment = await tx.payment.create({
+        data: {
+          tenancyId: tenancy.id,
+          amount,
+          datePaid,
+          method: 'cash',
+          periods: { create: periodRows },
+        },
+      });
+      const receipt = await tx.receipt.create({
+        data: { paymentId: payment.id, receiptNumber, emailStatus: 'none' },
+      });
+      return { payment, receipt, receiptNumber };
+    },
+    { timeout: 20000, maxWait: 20000 }
+  );
 
   const totalBalance = Math.max(0, tenancy.monthlyRent - amount);
-  const pdfPath = await generateReceiptPdf({
+  const pdfBytes = await buildReceiptPdf({
     receiptNumber: result.receiptNumber,
     datePaid,
     propertyName: settings.propertyName,
@@ -99,7 +103,10 @@ async function makePayment(tenancy, tenant, settings, { amount, month, year, dat
     periods: periodRows,
     totalBalance,
   });
-  await prisma.receipt.update({ where: { id: result.receipt.id }, data: { pdfPath } });
+  await prisma.receipt.update({
+    where: { id: result.receipt.id },
+    data: { pdf: Buffer.from(pdfBytes) },
+  });
 }
 
 async function seedTenants() {
@@ -175,11 +182,17 @@ async function seedTenants() {
 }
 
 async function main() {
-  console.log('Seeding RentReceipt (Kabulonga Court, 48 beds)...');
+  console.log('Seeding RentReceipt (landlord + 24 rooms / 48 beds)...');
   await seedLandlord();
   await seedSettings();
   await seedRooms();
-  await seedTenants();
+  // Demo tenants are for local testing only — never seed fake tenants into a
+  // real/production database. Opt in with SEED_DEMO=1.
+  if (process.env.SEED_DEMO === '1') {
+    await seedTenants();
+  } else {
+    console.log('  (skipping demo tenants — set SEED_DEMO=1 to add sample data)');
+  }
   console.log('Seed complete.');
 }
 

@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import { prisma, ensureSettings } from '../db.js';
-import { nextReceiptNumber } from '../receiptNumber.js';
+import { nextReceiptNumber, ensureReceiptCounter } from '../receiptNumber.js';
 import { allocatePayment } from '../status.js';
 import { appliedByMonth } from '../tenancyService.js';
-import { generateReceiptPdf } from '../pdf.js';
+import { buildReceiptPdf } from '../pdf.js';
 import { queueAndSend, isSmtpConfigured } from '../email.js';
 
 const router = Router();
@@ -73,32 +73,35 @@ router.post('/', async (req, res) => {
 
   const year = new Date().getFullYear();
   const settings = await ensureSettings();
+  await ensureReceiptCounter(prisma, year); // outside the txn to keep the hot path UPDATE-only
 
   // --- Atomic: receipt number + payment + periods + receipt row --------------
-  const result = await prisma.$transaction(async (tx) => {
-    const { receiptNumber } = await nextReceiptNumber(tx, year);
-    const payment = await tx.payment.create({
-      data: {
-        tenancyId: tenancy.id,
-        amount: amt,
-        datePaid: datePaid ? new Date(datePaid) : new Date(),
-        method: pmethod,
-        periods: { create: periodRows },
-      },
-    });
-    const receipt = await tx.receipt.create({
-      data: {
-        paymentId: payment.id,
-        receiptNumber,
-        pdfPath: '', // filled after PDF render below
-        emailStatus: 'none',
-      },
-    });
-    return { payment, receipt, receiptNumber };
-  });
+  const result = await prisma.$transaction(
+    async (tx) => {
+      const { receiptNumber } = await nextReceiptNumber(tx, year);
+      const payment = await tx.payment.create({
+        data: {
+          tenancyId: tenancy.id,
+          amount: amt,
+          datePaid: datePaid ? new Date(datePaid) : new Date(),
+          method: pmethod,
+          periods: { create: periodRows },
+        },
+      });
+      const receipt = await tx.receipt.create({
+        data: {
+          paymentId: payment.id,
+          receiptNumber,
+          emailStatus: 'none',
+        },
+      });
+      return { payment, receipt, receiptNumber };
+    },
+    { timeout: 20000, maxWait: 20000 }
+  );
 
-  // --- Render + store the PDF once (outside the DB transaction) --------------
-  const pdfPath = await generateReceiptPdf({
+  // --- Build the PDF once and store its bytes in the DB ----------------------
+  const pdfBytes = await buildReceiptPdf({
     receiptNumber: result.receiptNumber,
     datePaid: result.payment.datePaid,
     propertyName: settings.propertyName,
@@ -110,7 +113,10 @@ router.post('/', async (req, res) => {
     periods: periodRows,
     totalBalance,
   });
-  await prisma.receipt.update({ where: { id: result.receipt.id }, data: { pdfPath } });
+  await prisma.receipt.update({
+    where: { id: result.receipt.id },
+    data: { pdf: Buffer.from(pdfBytes) },
+  });
 
   // --- Email (queued + retried on failure) -----------------------------------
   let emailStatus = 'none';

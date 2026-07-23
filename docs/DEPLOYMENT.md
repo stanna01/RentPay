@@ -4,13 +4,16 @@ RentReceipt is a **single-process** app in production: the Node/Express backend
 serves both the API and the built React app on one port. This keeps hosting cheap
 and simple.
 
+The app is **fully stateless on disk** — all data lives in **MySQL**, including the
+receipt PDFs (stored as bytes). So there is **no volume or filesystem to manage**;
+you just need the app and a MySQL database.
+
 You have two good options:
 
+- **Option B — PaaS** (Railway or Render): easiest. Run the app + a managed MySQL in
+  one project. No persistent disk needed. **Recommended.**
 - **Option A — Low-cost VPS** (DigitalOcean, Hetzner, Linode): most control,
-  ~$4–6/month, you manage the server. Recommended for full ownership of your
-  SQLite file and receipt PDFs.
-- **Option B — PaaS** (Railway or Render): least setup, but you must attach a
-  **persistent disk** so the SQLite database and PDFs survive restarts.
+  ~$4–6/month, you manage the server; point it at any managed MySQL.
 
 ---
 
@@ -47,26 +50,12 @@ npm install
 npm run build
 ```
 
-### 3. Create a persistent data location
+### 3. Point at a MySQL database
 
-Keep the database and receipts **outside** the app folder so redeploys never wipe
-them:
-
-```bash
-sudo mkdir -p /var/lib/rentreceipt/receipts
-sudo chown -R $USER:$USER /var/lib/rentreceipt
-```
-
-Point the app at it — the receipts folder is `server/storage/receipts`; symlink
-it (or set the DB path outside the repo):
-
-```bash
-# Database outside the repo:
-#   DATABASE_URL="file:/var/lib/rentreceipt/prod.db"
-# Persist receipts by symlinking the storage dir:
-rm -rf server/storage/receipts
-ln -s /var/lib/rentreceipt/receipts server/storage/receipts
-```
+Use any managed MySQL (Railway, Aiven, PlanetScale-compatible providers, or a MySQL
+you run yourself). You just need its connection string for `DATABASE_URL` in the next
+step. There is **no local data directory to create** — the database (and the receipt
+PDFs inside it) lives in MySQL.
 
 ### 4. Environment file
 
@@ -76,7 +65,7 @@ values:
 ```env
 NODE_ENV=production
 PORT=4000
-DATABASE_URL="file:/var/lib/rentreceipt/prod.db"
+DATABASE_URL="mysql://user:password@host:3306/dbname"
 JWT_SECRET="<paste output of: openssl rand -base64 48>"
 LANDLORD_EMAIL="you@example.com"
 LANDLORD_PASSWORD="<a strong password — change after first login>"
@@ -162,16 +151,18 @@ Both build from your repo and run one web service.
 
 ### Settings
 
-- **Build command:** `npm install && npm run build`
-- **Start command:** `npm run db:migrate --workspace server && npm start`
-- **Persistent disk (required):** mount a volume and put the database + receipts
-  on it, e.g. mount at `/data`, then set:
-  - `DATABASE_URL=file:/data/prod.db`
-  - symlink receipts to the disk, or mount the volume at
-    `server/storage/receipts`.
-- **Environment variables:** set everything from `.env.example`
-  (`NODE_ENV=production`, `JWT_SECRET`, `LANDLORD_EMAIL`, `LANDLORD_PASSWORD`,
-  `SMTP_*`). Railway/Render provide `PORT` automatically — the app reads it.
+1. **Add a MySQL database** to the project (Railway: **+ New → Database → MySQL**;
+   Render: create a MySQL instance or use an external one like Aiven).
+2. Deploy the app as a web service with:
+   - **Build command:** `npm install && npm run build`
+   - **Start command:** `npm run db:migrate --workspace server && npm start`
+3. **Environment variables:** set everything from `.env.example`
+   (`NODE_ENV=production`, `JWT_SECRET`, `LANDLORD_EMAIL`, `LANDLORD_PASSWORD`,
+   `APP_URL`, `SMTP_*`, and **`DATABASE_URL`** = your MySQL connection string).
+   Railway/Render provide `PORT` automatically — the app reads it.
+
+> **No persistent disk / volume is needed.** The database and all receipt PDFs live
+> in MySQL, so the app's own filesystem being ephemeral doesn't matter.
 
 ### First deploy
 
@@ -183,9 +174,6 @@ shell:
 npm run db:seed --workspace server
 ```
 
-> ⚠️ Without a persistent disk, PaaS filesystems are ephemeral — your database
-> and PDFs would be lost on every redeploy. Always attach a volume.
-
 ---
 
 ## Production checklist
@@ -194,6 +182,6 @@ npm run db:seed --workspace server
 - [ ] Strong, unique `JWT_SECRET`
 - [ ] Changed the landlord password after first login
 - [ ] HTTPS working (required for the secure login cookie)
-- [ ] Database + `receipts/` on persistent storage
+- [ ] `DATABASE_URL` points at your production MySQL
 - [ ] Automated backups configured — see [BACKUP.md](./BACKUP.md)
 - [ ] Email tested from Settings → "Send test email"

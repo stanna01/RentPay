@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { promises as fs } from 'fs';
 import { prisma, ensureSettings } from '../db.js';
 import { queueAndSend, isSmtpConfigured } from '../email.js';
 import { formatKwacha, amountInWords } from '../money.js';
@@ -45,21 +44,16 @@ router.get('/:id', async (req, res) => {
 });
 
 /**
- * GET /api/receipts/:id/pdf — stream the STORED PDF (never regenerated).
+ * GET /api/receipts/:id/pdf — stream the STORED PDF from the DB (never regenerated).
  * ?download=1 forces a download instead of inline view.
  */
 router.get('/:id/pdf', async (req, res) => {
   const receipt = await prisma.receipt.findUnique({ where: { id: Number(req.params.id) } });
-  if (!receipt || !receipt.pdfPath) return res.status(404).json({ error: 'Receipt PDF not found.' });
-  try {
-    const bytes = await fs.readFile(receipt.pdfPath);
-    res.setHeader('Content-Type', 'application/pdf');
-    const disp = req.query.download ? 'attachment' : 'inline';
-    res.setHeader('Content-Disposition', `${disp}; filename="${receipt.receiptNumber}.pdf"`);
-    res.send(bytes);
-  } catch {
-    res.status(404).json({ error: 'The stored receipt file could not be found.' });
-  }
+  if (!receipt || !receipt.pdf) return res.status(404).json({ error: 'Receipt PDF not found.' });
+  res.setHeader('Content-Type', 'application/pdf');
+  const disp = req.query.download ? 'attachment' : 'inline';
+  res.setHeader('Content-Disposition', `${disp}; filename="${receipt.receiptNumber}.pdf"`);
+  res.send(Buffer.from(receipt.pdf));
 });
 
 /** POST /api/receipts/:id/resend — re-send the stored receipt by email. */

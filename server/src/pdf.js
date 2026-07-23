@@ -2,13 +2,7 @@
 // A receipt PDF is generated ONCE and saved; reprint/re-send reads the file.
 
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import { promises as fs } from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { formatKwacha, amountInWords } from './money.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const RECEIPTS_DIR = path.resolve(__dirname, '..', 'storage', 'receipts');
 
 const A4 = { width: 595.28, height: 841.89 }; // points
 const MARGIN = 50;
@@ -23,7 +17,8 @@ function formatDate(d) {
 }
 
 /**
- * Generate the receipt PDF and write it to storage. Returns the file path.
+ * Build the receipt PDF and return its bytes (Uint8Array). The bytes are stored
+ * in the database (Receipt.pdf); nothing is written to disk.
  * data = {
  *   receiptNumber, datePaid, propertyName, propertyAddress,
  *   tenantName, roomLabel, method, amount (ngwee),
@@ -31,9 +26,7 @@ function formatDate(d) {
  *   totalExpected (ngwee), totalBalance (ngwee)
  * }
  */
-export async function generateReceiptPdf(data) {
-  await fs.mkdir(RECEIPTS_DIR, { recursive: true });
-
+export async function buildReceiptPdf(data) {
   const pdf = await PDFDocument.create();
   const page = pdf.addPage([A4.width, A4.height]);
   const font = await pdf.embedFont(StandardFonts.Helvetica);
@@ -169,12 +162,8 @@ export async function generateReceiptPdf(data) {
   text('Authorised signature', MARGIN, sigY - 14, { size: 9, color: muted });
   rightText('Thank you for your payment.', A4.width - MARGIN, sigY - 14, { size: 9, color: muted });
 
-  // --- Save -----------------------------------------------------------------
-  const bytes = await pdf.save();
-  const filename = `${data.receiptNumber}.pdf`;
-  const filePath = path.join(RECEIPTS_DIR, filename);
-  await fs.writeFile(filePath, bytes);
-  return filePath;
+  // --- Return bytes (stored in the DB by the caller) ------------------------
+  return await pdf.save(); // Uint8Array
 }
 
 function methodLabel(method) {

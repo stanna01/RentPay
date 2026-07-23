@@ -1,66 +1,65 @@
 # BACKUP — Protecting your data
 
-RentReceipt stores everything in two places:
+RentReceipt stores **everything in the MySQL database** — tenants, payments, receipt
+numbers, **and the receipt PDFs** (kept as bytes in the DB). So a single database
+backup captures all your data; there are no separate files to copy.
 
-1. The **SQLite database file** (tenants, payments, receipt numbers) — e.g.
-   `/var/lib/rentreceipt/prod.db`.
-2. The **receipt PDFs** — `server/storage/receipts/` (or the disk you symlinked
-   it to).
+You have two complementary options:
 
-Both must be backed up together so a restored database always has its matching
-PDFs.
+- **Managed provider backups** (easiest): Railway, Aiven, PlanetScale, RDS, etc. all
+  offer automated daily backups / point-in-time restore. **Turn these on** — it's the
+  simplest safety net. Check your provider's dashboard for "Backups".
+- **Your own `mysqldump`** (portable, provider-independent): a daily dump you control
+  and can store anywhere. Covered below.
 
 ---
 
-## Daily automated backup (VPS / Linux, cron)
+## Daily automated backup with `mysqldump` (cron)
 
 ### 1. Backup script
 
-Save as `/usr/local/bin/rentreceipt-backup.sh` and make it executable
-(`chmod +x`). Adjust the paths at the top to match your install.
+Save as `/usr/local/bin/rentreceipt-backup.sh`, make it executable (`chmod +x`), and
+set your database connection details at the top.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --- Configure these ---
-DB_FILE="/var/lib/rentreceipt/prod.db"
-RECEIPTS_DIR="/var/lib/rentreceipt/receipts"
-BACKUP_ROOT="/var/backups/rentreceipt"   # second location (ideally another disk)
+# --- Configure these (from your DATABASE_URL) ---
+DB_HOST="host"
+DB_PORT="3306"
+DB_USER="user"
+DB_PASS="password"
+DB_NAME="railway"
+BACKUP_ROOT="/var/backups/rentreceipt"
 RETENTION_DAYS=30
-# -----------------------
+# ------------------------------------------------
 
 STAMP="$(date +%Y-%m-%d_%H%M%S)"
-DEST="$BACKUP_ROOT/$STAMP"
-mkdir -p "$DEST"
+mkdir -p "$BACKUP_ROOT"
 
-# 1. Consistent SQLite copy (works even while the app is running).
-sqlite3 "$DB_FILE" ".backup '$DEST/prod.db'"
+# Single-transaction dump = consistent snapshot without locking the app out.
+# --hex-blob keeps the receipt PDF bytes safe in the SQL dump.
+mysqldump \
+  --host="$DB_HOST" --port="$DB_PORT" --user="$DB_USER" --password="$DB_PASS" \
+  --single-transaction --quick --hex-blob --routines "$DB_NAME" \
+  | gzip > "$BACKUP_ROOT/$DB_NAME-$STAMP.sql.gz"
 
-# 2. Copy the receipt PDFs.
-mkdir -p "$DEST/receipts"
-cp -a "$RECEIPTS_DIR/." "$DEST/receipts/" 2>/dev/null || true
+# Delete backups older than RETENTION_DAYS.
+find "$BACKUP_ROOT" -name '*.sql.gz' -mtime +"$RETENTION_DAYS" -delete
 
-# 3. Compress into a single archive and remove the working folder.
-tar -czf "$DEST.tar.gz" -C "$BACKUP_ROOT" "$STAMP"
-rm -rf "$DEST"
-
-# 4. Delete backups older than RETENTION_DAYS.
-find "$BACKUP_ROOT" -name '*.tar.gz' -mtime +"$RETENTION_DAYS" -delete
-
-echo "Backup complete: $DEST.tar.gz"
+echo "Backup complete: $BACKUP_ROOT/$DB_NAME-$STAMP.sql.gz"
 ```
 
-> `sqlite3 ".backup"` produces a **consistent** snapshot even while the server is
-> running, which a plain `cp` of the DB file cannot guarantee. Install it with
-> `sudo apt-get install -y sqlite3` if needed.
+> Install the MySQL client tools if needed: `sudo apt-get install -y default-mysql-client`.
+> The single `.sql.gz` file already contains the PDFs — nothing else to back up.
 
 ### 2. Schedule it with cron
 
 Run daily at 02:15:
 
 ```bash
-sudo crontab -e
+crontab -e
 ```
 
 Add:
@@ -69,65 +68,49 @@ Add:
 15 2 * * * /usr/local/bin/rentreceipt-backup.sh >> /var/log/rentreceipt-backup.log 2>&1
 ```
 
-### 3. Send a copy off the server (strongly recommended)
+### 3. Send a copy off-site (strongly recommended)
 
-A backup on the same machine won't help if the machine dies. Copy the archive to
-another location — pick one:
+A backup next to the database won't help if that machine/account is lost. Copy the
+dump somewhere else — add one of these to the end of the script:
 
 ```bash
-# Another server via rsync/ssh:
-rsync -az "$DEST.tar.gz" backup-user@backup-host:/backups/rentreceipt/
+# Object storage (e.g. rclone to S3 / Backblaze B2 / Google Drive):
+rclone copy "$BACKUP_ROOT/$DB_NAME-$STAMP.sql.gz" remote:rentreceipt-backups/
 
-# Or object storage (e.g. rclone to S3/B2/Google Drive):
-rclone copy "$DEST.tar.gz" remote:rentreceipt-backups/
+# Or another server via ssh:
+rsync -az "$BACKUP_ROOT/$DB_NAME-$STAMP.sql.gz" backup-user@backup-host:/backups/
 ```
-
-Add whichever line to the end of the backup script.
 
 ---
 
 ## Restore procedure (tested)
 
-1. **Stop the app** so nothing writes during the restore:
+1. Have the target database ready (an empty database, or your existing one you intend
+   to overwrite).
+2. Decompress and import the dump:
    ```bash
-   pm2 stop rentreceipt
+   gunzip -c /var/backups/rentreceipt/railway-2026-07-23_021500.sql.gz \
+     | mysql --host="HOST" --port=3306 --user="USER" --password="PASS" "DB_NAME"
    ```
-2. **Pick the archive** to restore and unpack it somewhere temporary:
-   ```bash
-   mkdir -p /tmp/restore && tar -xzf /var/backups/rentreceipt/2026-07-18_021500.tar.gz -C /tmp/restore
-   ls /tmp/restore/*/          # you should see prod.db and receipts/
-   ```
-3. **Restore the database** (back up the current one first, just in case):
-   ```bash
-   cp /var/lib/rentreceipt/prod.db /var/lib/rentreceipt/prod.db.pre-restore 2>/dev/null || true
-   cp /tmp/restore/*/prod.db /var/lib/rentreceipt/prod.db
-   ```
-4. **Restore the receipts:**
-   ```bash
-   cp -a /tmp/restore/*/receipts/. /var/lib/rentreceipt/receipts/
-   ```
-5. **Fix ownership/permissions** so the app user can read/write:
-   ```bash
-   sudo chown -R $USER:$USER /var/lib/rentreceipt
-   ```
-6. **Start the app** and verify:
-   ```bash
-   pm2 start rentreceipt
-   ```
-   Log in, open a tenant, and click **Reprint** on an old receipt — the stored
-   PDF should open. Check the dashboard totals look right.
+3. Start the app pointed at that database and **verify**: log in, open a tenant, and
+   click **Reprint** on an old receipt — the stored PDF should open (proving the PDF
+   bytes restored). Check the dashboard totals look right.
+
+> Restoring into a **fresh** database is cleanest. To overwrite an existing one,
+> either drop/recreate it first or trust the dump's `DROP TABLE ... CREATE TABLE`
+> statements (mysqldump includes them by default).
 
 ### Verify your backups regularly
 
-A backup you've never restored is a hope, not a backup. Every few months, restore
-the latest archive onto a **test** machine (or a temporary folder with a separate
-`DATABASE_URL`) and confirm the app starts and receipts open.
+A backup you've never restored is a hope, not a backup. Every few months, restore the
+latest dump into a **throwaway** database and confirm the app starts and receipts
+open.
 
 ---
 
 ## Windows note
 
-If you host on Windows instead of Linux, use **Task Scheduler** to run a
-PowerShell equivalent daily: copy the `.db` file and the `receipts` folder into a
-timestamped folder under a backup drive, then zip it with `Compress-Archive`. The
-restore steps are the same — stop the app, copy the files back, restart.
+`mysqldump` / `mysql` ship with MySQL and MySQL Workbench on Windows too. Use **Task
+Scheduler** to run the same `mysqldump ... | gzip` command daily (via Git Bash or a
+PowerShell equivalent using `Compress-Archive`). Restore is the same `mysql < dump`
+import.

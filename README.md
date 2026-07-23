@@ -33,8 +33,9 @@ emails.
 
 ## Tech stack
 
-React + Vite + Tailwind (PWA) · Node.js + Express · SQLite via Prisma ·
-`pdf-lib` for PDFs · Nodemailer for email · JWT-in-httpOnly-cookie auth.
+React + Vite + Tailwind (PWA) · Node.js + Express · MySQL via Prisma ·
+`pdf-lib` for PDFs (stored in the database) · Nodemailer for email ·
+JWT-in-httpOnly-cookie auth.
 
 In production the Express server serves both the API and the built React app as a
 **single process** on one port.
@@ -45,9 +46,9 @@ In production the Express server serves both the API and the built React app as 
 
 ```bash
 npm install
-cp .env.example server/.env      # then edit server/.env
-npm run db:migrate               # create the database
-npm run db:seed                  # landlord + 24 rooms + demo data
+cp .env.example server/.env      # then edit server/.env (set your MySQL DATABASE_URL)
+npm run db:migrate               # create the MySQL tables
+npm run db:seed                  # landlord + 24 rooms (add SEED_DEMO=1 for sample data)
 npm run dev                      # http://localhost:5173
 npm test                         # business-logic + concurrency tests
 ```
@@ -108,8 +109,9 @@ under concurrent requests** (no duplicates, no gaps, never reused).
   row, so they stay **sequential and unique even under concurrent requests**.
 - Each receipt's expected rent is **snapshotted** at payment time, so changing a
   tenant's rent later never corrupts past receipts or reports.
-- Receipt PDFs are generated **once** and stored; reprint/re-send always serves the
-  original file.
+- Receipt PDFs are generated **once** and stored **in the database**; reprint/re-send
+  always serves the original stored bytes (never regenerated). This also keeps the app
+  stateless on disk — no volume needed in production.
 
 ## License
 
