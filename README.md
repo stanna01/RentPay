@@ -1,12 +1,16 @@
 # RentReceipt 🧾
 
-A mobile-first **PWA** for a landlord to manage a single property with **24 rooms
-(48 beds — two per room)** in Zambia: track tenants, record rent payments in
+A mobile-first **PWA** for landlords to manage one or more properties (rooms with
+one or more beds each) in Zambia: track tenants, record rent payments in
 **Zambian Kwacha (K)**, and issue sequential PDF receipts that are emailed to
 tenants.
 
-The landlord is the only user. Tenants never log in — they only receive receipt
-emails.
+Two roles: **Administrators** (full control, including voiding/correcting
+payments, users, properties and the audit log) and **Landlords** (day-to-day work
+on the properties they are given). Tenants never log in — they only receive
+receipt emails. See [docs/SECURITY.md](docs/SECURITY.md) for how the app is
+protected, and [docs/UPGRADE.md](docs/UPGRADE.md) before upgrading an existing
+installation.
 
 ---
 
@@ -14,7 +18,10 @@ emails.
 
 - 📱 **Installable PWA**, mobile-first, large touch targets, works offline for
   viewing.
-- 🏠 **Room board** — 24 rooms, each with two beds (A/B), colour-coded status
+- 🏢 **Multiple properties** — each with its own rooms, tenants and receipt numbers.
+- 🛡️ **Admin** — users & roles, void/correct payments (never deleted), arrears
+  waivers/charges, append-only audit log.
+- 🏠 **Room board** — every room with its beds (A/B…), colour-coded status
   (paid / part-paid / due / vacant) and month navigation.
 - 👤 **Tenants & tenancies** — assign a tenant to a specific bed, per-tenancy rent,
   move-out keeps full history, tenancy duration ("X years, Y months").
@@ -48,12 +55,13 @@ In production the Express server serves both the API and the built React app as 
 npm install
 cp .env.example server/.env      # then edit server/.env (set your MySQL DATABASE_URL)
 npm run db:migrate               # create the MySQL tables
-npm run db:seed                  # landlord + 24 rooms (add SEED_DEMO=1 for sample data)
+npm run db:seed                  # first admin + property with 24 rooms (SEED_DEMO=1 for sample data)
 npm run dev                      # http://localhost:5173
 npm test                         # business-logic + concurrency tests
 ```
 
-Log in with the `LANDLORD_EMAIL` / `LANDLORD_PASSWORD` from `server/.env`.
+Log in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `server/.env`; you'll be asked
+to choose your own password straight away.
 
 Full details: **[docs/SETUP.md](docs/SETUP.md)**.
 
@@ -63,6 +71,8 @@ Full details: **[docs/SETUP.md](docs/SETUP.md)**.
 
 | Guide | What it covers |
 | ----- | -------------- |
+| [docs/PLATFORM_PLAN.md](docs/PLATFORM_PLAN.md) | **The roadmap:** turning this into a platform for landlords, students, sponsors and a super admin, with in-app payments. |
+| [mobile/README.md](mobile/README.md) | The Android + iPhone app (Expo): running it on a phone, demo accounts. |
 | [docs/SETUP.md](docs/SETUP.md) | Local development from a fresh clone. |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Production deploy: VPS (pm2 + Nginx + HTTPS) **and** PaaS (Railway/Render). |
 | [docs/BACKUP.md](docs/BACKUP.md) | Automated daily backups of the database + PDFs, and a tested restore. |
@@ -88,6 +98,7 @@ RentReceipt/
 ├─ client/                React + Vite PWA
 │  └─ src/pages/          Login, Dashboard, TenantProfile, AssignTenant,
 │                         RecordPayment, ReceiptPreview, Reports, Settings
+├─ mobile/                Android + iPhone app (Expo, TypeScript) — demo data for now
 └─ docs/                  the guides above
 ```
 

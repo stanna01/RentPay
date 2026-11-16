@@ -1,7 +1,12 @@
+// Global email/SMTP settings (admin only — mounted behind requireRole('ADMIN')).
+// Property names and addresses live on each Property (routes/properties.js).
+
 import { Router } from 'express';
 import { prisma, ensureSettings } from '../db.js';
 import { sendTestEmail } from '../email.js';
 import { encryptSecret } from '../crypto.js';
+import { audit } from '../audit.js';
+import { parse, z, text } from '../validate.js';
 
 const router = Router();
 
@@ -17,43 +22,44 @@ router.get('/', async (req, res) => {
   res.json(publicSettings(s));
 });
 
-/** PUT /api/settings — update property + email/SMTP config. */
+/** PUT /api/settings — update email/SMTP config. */
 router.put('/', async (req, res) => {
-  await ensureSettings();
-  const b = req.body || {};
-  const data = {};
-  const strFields = [
-    'propertyName',
-    'propertyAddress',
-    'landlordEmail',
-    'smtpHost',
-    'smtpUser',
-    'smtpFromName',
-    'smtpFromEmail',
-  ];
-  for (const f of strFields) if (b[f] != null) data[f] = String(b[f]).trim();
-  if (b.smtpPort != null) data.smtpPort = Number(b.smtpPort) || 465;
-  if (b.smtpSecure != null) data.smtpSecure = !!b.smtpSecure;
+  const before = await ensureSettings();
+  const optionalEmailField = (msg) => z.union([z.literal(''), z.string().trim().toLowerCase().email(msg)]).optional();
+  const b = parse(
+    z.object({
+      landlordEmail: optionalEmailField('Please enter a valid contact email.'),
+      smtpHost: text().optional(),
+      smtpPort: z.coerce.number().int().min(1).max(65535).optional(),
+      smtpSecure: z.boolean().optional(),
+      smtpUser: text().optional(),
+      smtpPass: z.string().max(500).optional(),
+      smtpFromName: text().optional(),
+      smtpFromEmail: optionalEmailField('Please enter a valid "from" email.'),
+    }),
+    req.body
+  );
+  const { smtpPass, ...data } = b;
   // Only overwrite the password when a non-empty value is supplied; store it
   // encrypted at rest (AES-256-GCM) rather than as plaintext.
-  if (b.smtpPass) data.smtpPass = encryptSecret(String(b.smtpPass));
-
-  if (data.landlordEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.landlordEmail)) {
-    return res.status(400).json({ error: 'Please enter a valid landlord email.' });
-  }
+  if (smtpPass) data.smtpPass = encryptSecret(smtpPass);
 
   const s = await prisma.setting.update({ where: { id: 1 }, data });
+  await audit(req, 'settings.update', {
+    type: 'settings',
+    id: 1,
+    before: publicSettings(before),
+    after: { ...publicSettings(s), smtpPassChanged: !!smtpPass },
+  });
   res.json(publicSettings(s));
 });
 
 /** POST /api/settings/test-email — send a test message (single connection). */
 router.post('/test-email', async (req, res) => {
   const s = await ensureSettings();
-  const to = (req.body?.to || s.landlordEmail || '').trim();
+  const to = String(req.body?.to || s.landlordEmail || req.user.email || '').trim();
   if (!to) {
-    return res
-      .status(400)
-      .json({ error: 'Add a landlord email (or a test address) before testing.' });
+    return res.status(400).json({ error: 'Add a contact email (or a test address) before testing.' });
   }
   try {
     // sendTestEmail connects + authenticates + sends in one connection, so we

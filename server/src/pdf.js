@@ -1,7 +1,7 @@
 // A4 receipt PDF rendering with pdf-lib. Pure JS, no headless browser.
 // A receipt PDF is generated ONCE and saved; reprint/re-send reads the file.
 
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 import { formatKwacha, amountInWords } from './money.js';
 
 const A4 = { width: 595.28, height: 841.89 }; // points
@@ -164,6 +164,45 @@ export async function buildReceiptPdf(data) {
 
   // --- Return bytes (stored in the DB by the caller) ------------------------
   return await pdf.save(); // Uint8Array
+}
+
+/**
+ * Return a copy of a stored receipt PDF stamped VOID. The original bytes are
+ * never modified. info = { reason, voidedAt, replacedBy? }
+ */
+export async function stampVoid(originalBytes, info) {
+  const pdf = await PDFDocument.load(originalBytes);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const red = rgb(0.75, 0.12, 0.1);
+  const line1 = `VOIDED on ${formatDate(info.voidedAt || new Date())}. This receipt is no longer valid.`;
+  const line2 =
+    `Reason: ${String(info.reason || '').slice(0, 90)}` +
+    (info.replacedBy ? `  ·  Replaced by ${info.replacedBy}` : '');
+  for (const page of pdf.getPages()) {
+    const { width, height } = page.getSize();
+    page.drawText('VOID', {
+      x: width / 2 - 150,
+      y: height / 2 - 130,
+      size: 150,
+      font: bold,
+      color: red,
+      opacity: 0.22,
+      rotate: degrees(35),
+    });
+    page.drawRectangle({
+      x: MARGIN,
+      y: MARGIN - 12,
+      width: width - 2 * MARGIN,
+      height: 42,
+      color: rgb(1, 0.94, 0.93),
+      borderColor: red,
+      borderWidth: 1,
+    });
+    page.drawText(line1, { x: MARGIN + 10, y: MARGIN + 14, size: 10, font: bold, color: red });
+    page.drawText(line2, { x: MARGIN + 10, y: MARGIN, size: 9, font, color: red });
+  }
+  return await pdf.save();
 }
 
 function methodLabel(method) {

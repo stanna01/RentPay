@@ -11,14 +11,18 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState('');
+  const [locked, setLocked] = useState('');
 
   const submitLogin = async (e) => {
     e.preventDefault();
     setBusy(true);
+    setLocked('');
     try {
       await login(email.trim(), password);
     } catch (err) {
-      toast.error(err.message);
+      // A lockout (423) or network limit (429) stays on screen; other errors toast.
+      if (err.status === 423 || err.status === 429) setLocked(err.message);
+      else toast.error(err.message);
     } finally {
       setBusy(false);
     }
@@ -49,6 +53,11 @@ export default function Login() {
 
       {mode === 'login' ? (
         <form onSubmit={submitLogin} className="card w-full max-w-sm p-6">
+          {locked && (
+            <div role="alert" className="mb-4 rounded-xl border border-[#F2D7D0] bg-due-bg px-3.5 py-3 text-[13.5px] font-semibold text-due-text">
+              {locked}
+            </div>
+          )}
           <label className="field-label" htmlFor="email">Email</label>
           <input id="email" type="email" autoComplete="username" className="field-input mb-4" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" required />
           <label className="field-label" htmlFor="password">Password</label>

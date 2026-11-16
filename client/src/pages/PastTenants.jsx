@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, formatK } from '../api.js';
+import { api, qs, formatK } from '../api.js';
+import { useAuth } from '../auth.jsx';
 import { Loading, EmptyState, useToast } from '../ui.jsx';
 
 function fmtDate(d) {
@@ -10,14 +11,15 @@ function fmtDate(d) {
 export default function PastTenants() {
   const navigate = useNavigate();
   const toast = useToast();
+  const { propertyId } = useAuth();
   const [tab, setTab] = useState('active'); // 'active' | 'archived'
   const [rows, setRows] = useState(null);
 
   const load = () => {
     setRows(null);
-    api.get(`/tenancies/past?archived=${tab === 'archived' ? 1 : 0}`).then(setRows).catch((e) => toast.error(e.message));
+    api.get(`/tenancies/past${qs({ archived: tab === 'archived' ? 1 : 0, propertyId })}`).then(setRows).catch((e) => toast.error(e.message));
   };
-  useEffect(load, [tab]);
+  useEffect(load, [tab, propertyId]);
 
   const archive = async (id, name) => {
     try {

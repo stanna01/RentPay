@@ -5,8 +5,12 @@ import nodemailer from 'nodemailer';
 import { prisma, ensureSettings } from './db.js';
 import { formatKwacha } from './money.js';
 import { decryptSecret } from './crypto.js';
+import { ensureReceiptPdf } from './paymentService.js';
 
 const MAX_ATTEMPTS = 6;
+
+// An error that retrying will not fix (voided payment, no email on file).
+const permanent = (msg) => Object.assign(new Error(msg), { permanent: true });
 
 /** Resolve effective SMTP config: DB settings override .env defaults. */
 export async function resolveSmtp() {
@@ -55,9 +59,31 @@ export async function sendPasswordResetEmail(to, link) {
     to,
     subject: 'Reset your RentReceipt password',
     text:
-      'A password reset was requested for your RentReceipt landlord account.\n\n' +
-      `Open this link within 1 hour to set a new password:\n${link}\n\n` +
+      'A password reset was requested for your RentReceipt account.\n\n' +
+      `Open this link within 30 minutes to set a new password:\n${link}\n\n` +
       "If you didn't request this, you can ignore this email — your password will not change.",
+  });
+}
+
+/** Send a plain-text notice (security alerts, void notices). Throws on failure. */
+export async function sendNoticeEmail(to, subject, text) {
+  const cfg = await resolveSmtp();
+  const transport = buildTransport(cfg);
+  await transport.sendMail({ from: `"${cfg.fromName}" <${cfg.fromEmail}>`, to, subject, text });
+}
+
+/**
+ * Fire-and-forget notice: never blocks or fails the request, does nothing
+ * when email is not configured.
+ */
+export function notifyInBackground(to, subject, text) {
+  if (!to) return;
+  setImmediate(async () => {
+    try {
+      if (await isSmtpConfigured()) await sendNoticeEmail(to, subject, text);
+    } catch (e) {
+      console.error('[email] notice failed:', e.message);
+    }
   });
 }
 
@@ -90,34 +116,37 @@ export async function sendReceiptEmail(receiptId) {
   const receipt = await prisma.receipt.findUnique({
     where: { id: receiptId },
     include: {
-      payment: { include: { tenancy: { include: { tenant: true, room: true } } } },
+      payment: { include: { tenancy: { include: { tenant: true, room: { include: { property: true } } } } } },
     },
   });
-  if (!receipt) throw new Error('Receipt not found');
+  if (!receipt) throw permanent('Receipt not found');
+  // A voided receipt must never reach the tenant as if it were valid.
+  if (receipt.payment.status !== 'ACTIVE') throw permanent('This payment has been voided.');
 
   const tenant = receipt.payment.tenancy.tenant;
-  if (!tenant.email) throw new Error('This tenant has no email address on file.');
+  if (!tenant.email) throw permanent('This tenant has no email address on file.');
 
   const cfg = await resolveSmtp();
   const transport = buildTransport(cfg);
-  const settings = await ensureSettings();
+  const property = receipt.payment.tenancy.room.property;
 
-  if (!receipt.pdf) throw new Error('Receipt PDF is missing.');
+  const pdf = await ensureReceiptPdf(receiptId);
+  if (!pdf) throw new Error('Receipt PDF is missing.');
   const amount = formatKwacha(receipt.payment.amount);
 
   await transport.sendMail({
     from: `"${cfg.fromName}" <${cfg.fromEmail}>`,
     to: tenant.email,
-    subject: `Rent receipt ${receipt.receiptNumber} — ${settings.propertyName}`,
+    subject: `Rent receipt ${receipt.receiptNumber} — ${property.name}`,
     text:
       `Dear ${tenant.name},\n\n` +
-      `Thank you for your rent payment of ${amount} for room ${receipt.payment.tenancy.room.number}.\n` +
+      `Thank you for your rent payment of ${amount} for room ${receipt.payment.tenancy.room.number}${receipt.payment.tenancy.bed}.\n` +
       `Your receipt (${receipt.receiptNumber}) is attached.\n\n` +
-      `Regards,\n${settings.propertyName}`,
+      `Regards,\n${property.name}`,
     attachments: [
       {
         filename: `${receipt.receiptNumber}.pdf`,
-        content: Buffer.from(receipt.pdf),
+        content: pdf,
         contentType: 'application/pdf',
       },
     ],
@@ -150,7 +179,7 @@ async function processQueueItem(receiptId) {
     });
   } catch (err) {
     const attempts = item.attempts + 1;
-    const failedForGood = attempts >= MAX_ATTEMPTS;
+    const failedForGood = attempts >= MAX_ATTEMPTS || !!err.permanent;
     const backoffMs = Math.min(60 * 60 * 1000, 1000 * 2 ** attempts); // cap 1h
     await prisma.emailQueue.update({
       where: { id: item.id },

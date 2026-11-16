@@ -30,6 +30,14 @@ async function request(method, url, body) {
     const message = (data && data.error) || 'Something went wrong. Please try again.';
     const err = new Error(message);
     err.status = res.status;
+    err.code = data && data.code;
+    // Let the app react globally: session ended, or a new password is required.
+    if (res.status === 401 && !url.startsWith('/auth/')) {
+      window.dispatchEvent(new CustomEvent('rr:session-expired'));
+    }
+    if (err.code === 'PASSWORD_CHANGE_REQUIRED') {
+      window.dispatchEvent(new CustomEvent('rr:password-change-required'));
+    }
     throw err;
   }
   return data;
@@ -40,7 +48,16 @@ export const api = {
   post: (url, body) => request('POST', url, body),
   put: (url, body) => request('PUT', url, body),
   patch: (url, body) => request('PATCH', url, body),
+  del: (url) => request('DELETE', url),
 };
+
+/** Build a query string, skipping empty values: qs({a: 1, b: ''}) → "?a=1". */
+export function qs(params) {
+  const s = new URLSearchParams(
+    Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
+  ).toString();
+  return s ? `?${s}` : '';
+}
 
 // Convert Kwacha (user input) to integer ngwee.
 export function toNgwee(kwacha) {

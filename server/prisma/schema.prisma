@@ -10,84 +10,148 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// The single landlord account (the only user of the app).
-model Landlord {
-  id           Int      @id @default(autoincrement())
-  email        String   @unique
-  passwordHash String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+/// A person who can log in. ADMIN has full control (edit/void payments, manage
+/// users, properties, arrears, audit log); LANDLORD runs day-to-day work on the
+/// properties they are given access to.
+model User {
+  id                 Int       @id @default(autoincrement())
+  email              String    @unique
+  name               String    @default("")
+  role               String    @default("LANDLORD") // ADMIN | LANDLORD
+  passwordHash       String
+  isActive           Boolean   @default(true)
+  // Bumped to revoke every existing session (password change, reset, role
+  // change, deactivation, "log out everywhere").
+  tokenVersion       Int       @default(0)
+  mustChangePassword Boolean   @default(false)
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  propertyAccess PropertyAccess[]
+  auditLogs      AuditLog[]
 }
 
-/// Singleton row holding property + email/SMTP settings used on receipts.
+/// Global settings: email/SMTP config used for all properties.
 model Setting {
-  id              Int      @id @default(1)
-  propertyName    String   @default("My Property")
-  propertyAddress String   @default("")
-  landlordEmail   String   @default("")
+  id            Int      @id @default(1)
+  landlordEmail String   @default("") // contact/test address
   // SMTP overrides (fall back to .env when blank). Password stored server-side only.
-  smtpHost        String   @default("")
-  smtpPort        Int      @default(465)
-  smtpSecure      Boolean  @default(true)
-  smtpUser        String   @default("")
-  smtpPass        String   @default("")
-  smtpFromName    String   @default("RentReceipt")
-  smtpFromEmail   String   @default("")
-  updatedAt       DateTime @updatedAt
+  smtpHost      String   @default("")
+  smtpPort      Int      @default(465)
+  smtpSecure    Boolean  @default(true)
+  smtpUser      String   @default("")
+  smtpPass      String   @default("")
+  smtpFromName  String   @default("RentReceipt")
+  smtpFromEmail String   @default("")
+  updatedAt     DateTime @updatedAt
 }
 
-/// A physical room (1..24). Occupancy is derived from the current tenancy.
+/// A rental property. Its name/address are printed on receipts and its short
+/// code is part of every receipt number issued for it.
+model Property {
+  id         Int       @id @default(autoincrement())
+  name       String
+  address    String    @default("")
+  code       String    @unique // e.g. "KC" → RCT-KC-2026-0001
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  rooms           Room[]
+  tenants         Tenant[]
+  access          PropertyAccess[]
+  receiptCounters ReceiptCounter[]
+}
+
+/// Which properties a LANDLORD may see. ADMINs see every property.
+model PropertyAccess {
+  userId     Int
+  propertyId Int
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@id([userId, propertyId])
+  @@index([propertyId])
+}
+
+/// A physical room. Occupancy is derived from the current tenancy per bed.
 model Room {
-  number      Int       @id // 1..24
+  id          Int       @id @default(autoincrement())
+  propertyId  Int
+  number      Int
+  bedCount    Int       @default(2) // beds are labelled A, B, C…
   defaultRent Int       @default(0) // ngwee
-  tenancies   Tenancy[]
+  archivedAt  DateTime?
+
+  property  Property  @relation(fields: [propertyId], references: [id])
+  tenancies Tenancy[]
+
+  @@unique([propertyId, number])
 }
 
 model Tenant {
-  id        Int       @id @default(autoincrement())
-  name      String
-  phone     String    @default("")
-  email     String    @default("")
-  notes     String    @default("")
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id         Int       @id @default(autoincrement())
+  propertyId Int
+  name       String
+  phone      String    @default("")
+  email      String    @default("")
+  notes      String    @default("")
+  deletedAt  DateTime? // soft delete (records are kept)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  property  Property  @relation(fields: [propertyId], references: [id])
   tenancies Tenancy[]
+
+  @@index([propertyId])
 }
 
 /// A tenant's stay in a specific bed of a room. moveOutDate == null means current.
-/// Each room has two beds, "A" and "B" (24 rooms x 2 = 48 beds).
 model Tenancy {
-  id          Int       @id @default(autoincrement())
-  roomNumber  Int
-  bed         String    @default("A") // "A" | "B"
-  tenantId    Int
-  moveInDate  DateTime
-  moveOutDate DateTime?
-  archivedAt  DateTime? // set when a moved-out tenancy is archived (hidden from lists)
-  monthlyRent Int // ngwee, copied from room default, editable per tenancy
-  createdAt   DateTime  @default(now())
+  id           Int       @id @default(autoincrement())
+  roomId       Int
+  bed          String    @default("A")
+  tenantId     Int
+  moveInDate   DateTime
+  moveOutDate  DateTime?
+  archivedAt   DateTime? // set when a moved-out tenancy is archived (hidden from lists)
+  monthlyRent  Int // ngwee, copied from room default, editable per tenancy
+  // "roomId-bed" while current, NULL after move-out. The unique index makes it
+  // impossible for two current tenancies to occupy the same bed.
+  activeBedKey String?   @unique
+  createdAt    DateTime  @default(now())
 
-  room     Room      @relation(fields: [roomNumber], references: [number])
-  tenant   Tenant    @relation(fields: [tenantId], references: [id])
-  payments Payment[]
+  room        Room                @relation(fields: [roomId], references: [id])
+  tenant      Tenant              @relation(fields: [tenantId], references: [id])
+  payments    Payment[]
+  adjustments ArrearsAdjustment[]
 
-  @@index([roomNumber, bed])
+  @@index([roomId, bed])
   @@index([tenantId])
 }
 
 model Payment {
-  id         Int      @id @default(autoincrement())
-  tenancyId  Int
-  amount     Int // ngwee
-  datePaid   DateTime @default(now())
-  method     String   @default("cash") // cash | mobile_money | bank
-  createdAt  DateTime @default(now())
+  id                Int       @id @default(autoincrement())
+  tenancyId         Int
+  amount            Int // ngwee
+  datePaid          DateTime  @default(now())
+  method            String    @default("cash") // cash | mobile_money | bank
+  status            String    @default("ACTIVE") // ACTIVE | VOID
+  voidedAt          DateTime?
+  voidedById        Int?
+  voidReason        String    @default("")
+  replacesPaymentId Int? // set on a correction: the voided payment it replaces
+  createdById       Int?
+  createdAt         DateTime  @default(now())
 
   tenancy Tenancy         @relation(fields: [tenancyId], references: [id])
   periods PaymentPeriod[]
   receipt Receipt?
 
   @@index([tenancyId])
+  @@index([status])
 }
 
 /// How a payment is applied across one or more months.
@@ -109,8 +173,9 @@ model PaymentPeriod {
 model Receipt {
   id            Int       @id @default(autoincrement())
   paymentId     Int       @unique
-  receiptNumber String    @unique // RCT-YYYY-NNNN
+  receiptNumber String    @unique // RCT-CODE-YYYY-NNNN (legacy: RCT-YYYY-NNNN)
   pdf           Bytes?    @db.LongBlob // the immutable receipt PDF, stored in the DB
+  voidPdf       Bytes?    @db.LongBlob // copy stamped VOID, created when the payment is voided
   emailedAt     DateTime?
   emailStatus   String    @default("none") // none | pending | sent | failed
   createdAt     DateTime  @default(now())
@@ -119,10 +184,33 @@ model Receipt {
   emailQueue EmailQueue[]
 }
 
-/// Atomic sequential receipt numbering, per year.
+/// Atomic sequential receipt numbering, per property per year.
 model ReceiptCounter {
-  year    Int @id
-  lastSeq Int @default(0)
+  propertyId Int
+  year       Int
+  lastSeq    Int @default(0)
+
+  property Property @relation(fields: [propertyId], references: [id])
+
+  @@id([propertyId, year])
+}
+
+/// Admin adjustment to what a tenancy owes for one month: a negative amount
+/// waives rent, a positive amount adds a charge. Reversed, never deleted.
+model ArrearsAdjustment {
+  id          Int       @id @default(autoincrement())
+  tenancyId   Int
+  month       Int
+  year        Int
+  amount      Int // ngwee; < 0 waiver, > 0 charge
+  reason      String
+  createdById Int
+  reversedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  tenancy Tenancy @relation(fields: [tenancyId], references: [id])
+
+  @@index([tenancyId])
 }
 
 /// Outbox for receipt emails; retried by a background worker.
@@ -139,4 +227,34 @@ model EmailQueue {
   receipt Receipt @relation(fields: [receiptId], references: [id])
 
   @@index([status, nextRetryAt])
+}
+
+/// Per-email failed-login tracking (kept for unknown emails too, so lockout
+/// behaviour never reveals whether an account exists).
+model LoginThrottle {
+  email        String    @id
+  failedCount  Int       @default(0)
+  lockoutLevel Int       @default(0)
+  lockedUntil  DateTime?
+  lastFailedAt DateTime?
+}
+
+/// Append-only record of who did what. There is no API to edit or delete it.
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int?
+  action     String
+  entityType String   @default("")
+  entityId   String   @default("")
+  before     Json?
+  after      Json?
+  ip         String   @default("")
+  userAgent  String   @default("") @db.VarChar(255)
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+  @@index([userId])
 }

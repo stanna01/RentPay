@@ -88,3 +88,72 @@ export function StatusBadge({ status }) {
 export function Money({ ngwee, className = '' }) {
   return <span className={className}>{formatK(ngwee)}</span>;
 }
+
+// --- Modal (bottom sheet on phones) -----------------------------------------
+export function Modal({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white p-5 sm:rounded-3xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="mb-3 text-[20px] font-bold tracking-tight">{title}</h2>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A confirm dialog for admin actions that must be justified (void, waive…).
+ * onConfirm(reason, extra) may throw; the error is shown as a toast.
+ */
+export function ReasonDialog({ title, message, confirmLabel, danger = false, extra, onConfirm, onClose }) {
+  const toast = useToast();
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (reason.trim().length < 3) return toast.error('Please give a reason (at least 3 characters).');
+    setBusy(true);
+    try {
+      await onConfirm(reason.trim());
+      onClose();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title={title} onClose={onClose}>
+      {message && <div className="mb-3 text-[14px] text-muted">{message}</div>}
+      <label className="field-label" htmlFor="reason">Reason (kept in the audit log)</label>
+      <textarea id="reason" className="field-input min-h-[88px] py-3" maxLength={191} value={reason} onChange={(e) => setReason(e.target.value)} />
+      {extra}
+      <div className="mt-5 flex gap-3">
+        <button className="btn-secondary flex-1" onClick={onClose}>Cancel</button>
+        <button className={`${danger ? 'btn-danger' : 'btn-primary'} flex-1`} onClick={submit} disabled={busy}>
+          {busy ? 'Working…' : confirmLabel}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+export function fmtDate(d) {
+  return d ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+}
+
+export function fmtDateTime(d) {
+  return d
+    ? new Date(d).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '';
+}
+
+/** "Void" badge used on payments and receipts. */
+export function VoidBadge() {
+  return <span className="inline-block rounded-full bg-due-bg px-2.5 py-0.5 text-xs font-bold text-due-text">VOID</span>;
+}

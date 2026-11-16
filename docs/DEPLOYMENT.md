@@ -67,8 +67,11 @@ NODE_ENV=production
 PORT=4000
 DATABASE_URL="mysql://user:password@host:3306/dbname"
 JWT_SECRET="<paste output of: openssl rand -base64 48>"
-LANDLORD_EMAIL="you@example.com"
-LANDLORD_PASSWORD="<a strong password — change after first login>"
+ENCRYPTION_KEY="<a DIFFERENT output of: openssl rand -base64 48>"
+APP_URL="https://rent.yourdomain.com"
+TZ="Africa/Lusaka"
+ADMIN_EMAIL="you@example.com"
+ADMIN_PASSWORD="<a temporary password — you must change it at first sign-in>"
 # SMTP_* — see docs/EMAIL_SETUP.md
 ```
 
@@ -76,7 +79,7 @@ LANDLORD_PASSWORD="<a strong password — change after first login>"
 
 ```bash
 npm run db:migrate --workspace server   # applies migrations (prisma migrate deploy)
-npm run db:seed --workspace server      # creates landlord + 24 rooms
+npm run db:seed --workspace server      # creates the first admin + a property with 24 rooms
 ```
 
 > On later deploys run only `db:migrate` — **never** `db:reset` in production
@@ -157,8 +160,10 @@ Both build from your repo and run one web service.
    - **Build command:** `npm install && npm run build`
    - **Start command:** `npm run db:migrate --workspace server && npm start`
 3. **Environment variables:** set everything from `.env.example`
-   (`NODE_ENV=production`, `JWT_SECRET`, `LANDLORD_EMAIL`, `LANDLORD_PASSWORD`,
-   `APP_URL`, `SMTP_*`, and **`DATABASE_URL`** = your MySQL connection string).
+   (`NODE_ENV=production`, `JWT_SECRET`, `ENCRYPTION_KEY`, `APP_URL`, `TZ`,
+   `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `SMTP_*`, and **`DATABASE_URL`** = your MySQL
+   connection string). The server refuses to start in production if
+   `JWT_SECRET`, `ENCRYPTION_KEY` or `APP_URL` is missing or weak.
    Railway/Render provide `PORT` automatically — the app reads it.
 
 > **No persistent disk / volume is needed.** The database and all receipt PDFs live
@@ -167,7 +172,7 @@ Both build from your repo and run one web service.
 ### First deploy
 
 The start command runs `prisma migrate deploy` on every boot (safe/idempotent).
-To create the landlord + 24 rooms once, run a one-off command in the platform
+To create the first admin + property once, run a one-off command in the platform
 shell:
 
 ```bash
@@ -179,8 +184,12 @@ npm run db:seed --workspace server
 ## Production checklist
 
 - [ ] `NODE_ENV=production`
-- [ ] Strong, unique `JWT_SECRET`
-- [ ] Changed the landlord password after first login
+- [ ] Strong, unique `JWT_SECRET` and a **different** `ENCRYPTION_KEY`
+- [ ] `APP_URL` set to your https:// address (reset links + CSRF check use it)
+- [ ] `TZ=Africa/Lusaka` (or left unset — that is the default)
+- [ ] Signed in as the first admin and chose your own password
+- [ ] Only the people who need it are administrators (Admin → Users)
+- [ ] `npm audit` shows no high/critical issues (`npm run audit`)
 - [ ] HTTPS working (required for the secure login cookie)
 - [ ] `DATABASE_URL` points at your production MySQL
 - [ ] Automated backups configured — see [BACKUP.md](./BACKUP.md)

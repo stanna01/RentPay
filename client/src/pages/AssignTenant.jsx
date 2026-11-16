@@ -6,10 +6,10 @@ import { Loading, useToast } from '../ui.jsx';
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
 export default function AssignTenant() {
-  const { roomNumber, bed } = useParams();
+  const { roomId, bed } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
-  const roomLabel = `${roomNumber}${bed}`;
+  const [roomLabel, setRoomLabel] = useState(bed);
 
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState('');
@@ -20,14 +20,15 @@ export default function AssignTenant() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.get(`/rooms/${roomNumber}/${bed}`).then((r) => {
+    api.get(`/rooms/${roomId}/${bed}`).then((r) => {
+      setRoomLabel(r.roomLabel);
       setRent((r.room.defaultRent / 100).toString());
       if (r.tenancy) {
         toast.info('This bed is already occupied.');
         navigate(`/tenancy/${r.tenancy.id}`, { replace: true });
       }
-    }).finally(() => setLoading(false));
-  }, [roomNumber, bed]);
+    }).catch((e) => { toast.error(e.message); navigate('/', { replace: true }); }).finally(() => setLoading(false));
+  }, [roomId, bed]);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -36,7 +37,7 @@ export default function AssignTenant() {
     setBusy(true);
     try {
       const tenancy = await api.post('/tenancies', {
-        roomNumber: Number(roomNumber),
+        roomId: Number(roomId),
         bed,
         newTenant: { name, phone, email },
         monthlyRent: ngwee,

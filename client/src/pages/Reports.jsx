@@ -1,18 +1,30 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
-import { api, formatK } from '../api.js';
-import { Loading } from '../ui.jsx';
+import { api, qs, formatK } from '../api.js';
+import { Loading, useToast, fmtDate } from '../ui.jsx';
+import { useAuth } from '../auth.jsx';
 
 export default function Reports() {
+  const navigate = useNavigate();
+  const toast = useToast();
+  const { propertyId, properties, isAdmin } = useAuth();
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
+  const [scope, setScope] = useState('current'); // 'current' | 'all'
   const [data, setData] = useState(null);
+  const [voids, setVoids] = useState(null);
   const [loading, setLoading] = useState(true);
+  const scopeParam = scope === 'all' ? 'all' : propertyId;
 
   useEffect(() => {
     setLoading(true);
-    api.get(`/reports/income?year=${year}`).then(setData).finally(() => setLoading(false));
-  }, [year]);
+    api.get(`/reports/income${qs({ year, propertyId: scopeParam })}`)
+      .then(setData)
+      .catch((e) => toast.error(e.message))
+      .finally(() => setLoading(false));
+    if (isAdmin) api.get(`/reports/voids${qs({ year, propertyId: scopeParam })}`).then(setVoids).catch(() => setVoids([]));
+  }, [year, scopeParam]);
 
   const chartData = data?.rows.map((r) => ({ name: r.label, value: r.kwacha })) || [];
 
@@ -27,6 +39,26 @@ export default function Reports() {
         </div>
       </div>
 
+      {properties.length > 1 && (
+        <div className="grid grid-cols-2 gap-2">
+          {[['current', 'This property'], ['all', 'All properties']].map(([v, label]) => (
+            <button key={v} onClick={() => setScope(v)}
+              className={'rounded-xl px-4 py-2.5 text-sm font-semibold ' + (scope === v ? 'bg-brand text-white' : 'border border-line bg-white text-muted')}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <button onClick={() => navigate('/arrears')} className="card flex items-center gap-3 px-4 py-3.5 text-left">
+        <span className="text-2xl">⚠️</span>
+        <div className="flex-1">
+          <div className="font-semibold text-ink">Arrears report</div>
+          <div className="text-xs text-muted">Who owes rent, how much, and since when</div>
+        </div>
+        <span className="text-vacant-border">›</span>
+      </button>
+
       {loading || !data ? (
         <Loading />
       ) : (
@@ -34,6 +66,7 @@ export default function Reports() {
           <div className="card p-4">
             <div className="text-xs font-semibold uppercase tracking-wide text-muted">Total collected in {year}</div>
             <div className="mt-1 text-[28px] font-bold text-brand">{formatK(data.totalNgwee)}</div>
+            <div className="mt-1 text-xs text-muted">Voided payments are not counted.</div>
           </div>
 
           <div className="card p-4">
@@ -72,7 +105,29 @@ export default function Reports() {
             </table>
           </div>
 
-          <a href={`/api/reports/income?year=${year}&format=csv`} className="btn-secondary w-full">⬇️ Export CSV</a>
+          <a href={`/api/reports/income${qs({ year, propertyId: scopeParam, format: 'csv' })}`} className="btn-secondary w-full">⬇️ Export CSV</a>
+
+          {isAdmin && voids && (
+            <div className="card overflow-hidden">
+              <div className="border-b border-line px-4 py-3 text-[15px] font-bold">Voided payments in {year}</div>
+              {voids.length === 0 ? (
+                <div className="px-4 py-3 text-sm text-muted">None.</div>
+              ) : (
+                voids.map((v) => (
+                  <button key={v.paymentId} onClick={() => v.receipt && navigate(`/receipt/${v.receipt.id}`)} className="flex w-full flex-col border-b border-[#F0F2EE] px-4 py-2.5 text-left text-[13px] last:border-0">
+                    <div className="flex w-full gap-2">
+                      <span className="flex-1 font-semibold">{v.tenantName} · Room {v.roomLabel}</span>
+                      <span className="font-semibold text-muted line-through">{formatK(v.amount)}</span>
+                    </div>
+                    <div className="text-[12px] text-muted">
+                      {v.receipt?.receiptNumber} · voided {fmtDate(v.voidedAt)}{v.voidedBy ? ` by ${v.voidedBy.name || v.voidedBy.email}` : ''} · {v.voidReason}
+                      {v.replacement?.receipt && ` · replaced by ${v.replacement.receipt.receiptNumber}`}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

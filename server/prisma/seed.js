@@ -1,6 +1,7 @@
-// Seed: single landlord + 24 rooms (2 beds each = 48 beds) + a realistic set of
-// tenants with payment history, receipts and PDFs, mirroring the mobile design's
-// demo (some beds vacant, some partial, some due).
+// Seed: the first admin + one property with 24 rooms (2 beds each = 48 beds) +,
+// optionally, a realistic set of tenants with payment history, receipts and
+// PDFs, mirroring the mobile design's demo (some beds vacant, some partial,
+// some due).
 
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
@@ -20,17 +21,27 @@ const DUE_BEDS = ['4B', '10A', '15A', '23B'];
 const FIRSTS = ['Mary', 'Joseph', 'Grace', 'Peter', 'Agnes', 'Chanda', 'Bwalya', 'Natasha', 'Kelvin', 'Ruth', 'Moses', 'Esther', 'Brian', 'Loveness', 'Gift', 'Precious', 'David', 'Beatrice', 'Mutale', 'Thandiwe', 'Mwila', 'Chileshe', 'Kunda', 'Misozi', 'Luyando', 'Nchimunya', 'Mapalo', 'Taonga', 'Chimwemwe', 'Dalitso'];
 const LASTS = ['Banda', 'Mwansa', 'Phiri', 'Zulu', 'Tembo', 'Mulenga', 'Chisenga', 'Mumba', 'Sakala', 'Lungu', 'Daka', 'Ngoma', 'Musonda', 'Sichone', 'Kabwe', 'Malama', 'Simutowe', 'Chulu', 'Mwale', 'Sinkala'];
 
-async function seedLandlord() {
-  const email = (process.env.LANDLORD_EMAIL || 'landlord@example.com').toLowerCase();
-  const password = process.env.LANDLORD_PASSWORD || 'changeme123';
-  const existing = await prisma.landlord.findUnique({ where: { email } });
+async function seedAdmin() {
+  // ADMIN_* preferred; LANDLORD_* still accepted from older .env files.
+  const email = (process.env.ADMIN_EMAIL || process.env.LANDLORD_EMAIL || 'admin@example.com').toLowerCase();
+  const password = process.env.ADMIN_PASSWORD || process.env.LANDLORD_PASSWORD;
+  if (!password) {
+    throw new Error('Set ADMIN_PASSWORD in server/.env before seeding (a temporary password, 12+ characters).');
+  }
+  const existing = await prisma.user.findUnique({ where: { email } });
   if (!existing) {
-    await prisma.landlord.create({
-      data: { email, passwordHash: await bcrypt.hash(password, 10) },
+    await prisma.user.create({
+      data: {
+        email,
+        name: 'Administrator',
+        role: 'ADMIN',
+        passwordHash: await bcrypt.hash(password, 12),
+        mustChangePassword: true, // the seeded password must be replaced at first sign-in
+      },
     });
-    console.log(`  Landlord created: ${email} (password from .env)`);
+    console.log(`  Admin created: ${email} (temporary password from .env — must be changed at first sign-in)`);
   } else {
-    console.log(`  Landlord already exists: ${email}`);
+    console.log(`  User already exists: ${email}`);
   }
 }
 
@@ -40,39 +51,50 @@ async function seedSettings() {
     await prisma.setting.create({
       data: {
         id: 1,
-        propertyName: 'Kabulonga Court',
-        propertyAddress: 'Plot 14, Kabulonga Road, Lusaka',
-        landlordEmail: (process.env.LANDLORD_EMAIL || '').toLowerCase(),
+        landlordEmail: (process.env.ADMIN_EMAIL || process.env.LANDLORD_EMAIL || '').toLowerCase(),
         smtpFromName: 'Kabulonga Court',
       },
     });
-    console.log('  Settings created (Kabulonga Court).');
+    console.log('  Settings created.');
   }
 }
 
-async function seedRooms() {
+async function seedProperty() {
+  let property = await prisma.property.findFirst({ orderBy: { id: 'asc' } });
+  if (!property) {
+    property = await prisma.property.create({
+      data: { name: 'Kabulonga Court', address: 'Plot 14, Kabulonga Road, Lusaka', code: 'KC' },
+    });
+    console.log('  Property created: Kabulonga Court (code KC).');
+  }
   for (let n = 1; n <= 24; n++) {
     await prisma.room.upsert({
-      where: { number: n },
-      create: { number: n, defaultRent: rentFor(n) },
-      update: { defaultRent: rentFor(n) },
+      where: { propertyId_number: { propertyId: property.id, number: n } },
+      create: { propertyId: property.id, number: n, bedCount: 2, defaultRent: rentFor(n) },
+      update: {},
     });
   }
   console.log('  24 rooms ensured (48 beds).');
+  return property;
 }
 
 function ym(d) {
   return { month: d.getMonth() + 1, year: d.getFullYear() };
 }
 
-async function makePayment(tenancy, tenant, settings, { amount, month, year, datePaid }) {
+async function makePayment(property, room, tenancy, tenant, { amount, month, year, datePaid }) {
   const periodRows = [
     { month, year, amountApplied: amount, expectedRent: tenancy.monthlyRent },
   ];
-  await ensureReceiptCounter(prisma, year);
+  const receiptYear = datePaid.getFullYear();
+  await ensureReceiptCounter(prisma, property.id, receiptYear);
   const result = await prisma.$transaction(
     async (tx) => {
-      const { receiptNumber } = await nextReceiptNumber(tx, year);
+      const { receiptNumber } = await nextReceiptNumber(tx, {
+        propertyId: property.id,
+        code: property.code,
+        year: receiptYear,
+      });
       const payment = await tx.payment.create({
         data: {
           tenancyId: tenancy.id,
@@ -94,10 +116,10 @@ async function makePayment(tenancy, tenant, settings, { amount, month, year, dat
   const pdfBytes = await buildReceiptPdf({
     receiptNumber: result.receiptNumber,
     datePaid,
-    propertyName: settings.propertyName,
-    propertyAddress: settings.propertyAddress,
+    propertyName: property.name,
+    propertyAddress: property.address,
     tenantName: tenant.name,
-    roomLabel: `${tenancy.roomNumber}${tenancy.bed}`,
+    roomLabel: `${room.number}${tenancy.bed}`,
     method: 'cash',
     amount,
     periods: periodRows,
@@ -109,7 +131,7 @@ async function makePayment(tenancy, tenant, settings, { amount, month, year, dat
   });
 }
 
-async function seedTenants() {
+async function seedTenants(property) {
   const marker = await prisma.tenant.findFirst({ where: { notes: 'seed-demo' } });
   if (marker) {
     console.log('  Demo tenants already present — skipping.');
@@ -117,11 +139,13 @@ async function seedTenants() {
   }
 
   const now = new Date();
-  const settings = await prisma.setting.findUnique({ where: { id: 1 } });
+  const rooms = await prisma.room.findMany({ where: { propertyId: property.id } });
+  const roomByNumber = new Map(rooms.map((r) => [r.number, r]));
   let ti = 0;
   let occupied = 0;
 
   for (let roomNo = 1; roomNo <= 24; roomNo++) {
+    const room = roomByNumber.get(roomNo);
     for (const bed of ['A', 'B']) {
       const slot = `${roomNo}${bed}`;
       if (VACANT_BEDS.includes(slot)) continue;
@@ -133,6 +157,7 @@ async function seedTenants() {
 
       const tenant = await prisma.tenant.create({
         data: {
+          propertyId: property.id,
           name,
           phone: `+260 9${6 + (ti % 2)} ${String(200 + (ti * 37) % 700).padStart(3, '0')} ${String(1000 + (ti * 613) % 9000)}`,
           email: `${name.toLowerCase().replace(/\s+/g, '.')}@gmail.com`,
@@ -140,7 +165,14 @@ async function seedTenants() {
         },
       });
       const tenancy = await prisma.tenancy.create({
-        data: { roomNumber: roomNo, bed, tenantId: tenant.id, moveInDate: moveIn, monthlyRent: rent },
+        data: {
+          roomId: room.id,
+          bed,
+          tenantId: tenant.id,
+          moveInDate: moveIn,
+          monthlyRent: rent,
+          activeBedKey: `${room.id}-${bed}`,
+        },
       });
       occupied += 1;
 
@@ -149,7 +181,7 @@ async function seedTenants() {
       const curStart = new Date(now.getFullYear(), now.getMonth(), 1);
       while (d < curStart) {
         const { month, year } = ym(d);
-        await makePayment(tenancy, tenant, settings, {
+        await makePayment(property, room, tenancy, tenant, {
           amount: rent,
           month,
           year,
@@ -161,14 +193,14 @@ async function seedTenants() {
       // Current month per demo status.
       const cur = ym(curStart);
       if (PARTIAL_BEDS.includes(slot)) {
-        await makePayment(tenancy, tenant, settings, {
+        await makePayment(property, room, tenancy, tenant, {
           amount: rent - 50000, // K500 short
           month: cur.month,
           year: cur.year,
           datePaid: new Date(now.getFullYear(), now.getMonth(), 3),
         });
       } else if (!DUE_BEDS.includes(slot)) {
-        await makePayment(tenancy, tenant, settings, {
+        await makePayment(property, room, tenancy, tenant, {
           amount: rent,
           month: cur.month,
           year: cur.year,
@@ -182,14 +214,14 @@ async function seedTenants() {
 }
 
 async function main() {
-  console.log('Seeding RentReceipt (landlord + 24 rooms / 48 beds)...');
-  await seedLandlord();
+  console.log('Seeding RentReceipt (admin + property with 24 rooms / 48 beds)...');
+  await seedAdmin();
   await seedSettings();
-  await seedRooms();
+  const property = await seedProperty();
   // Demo tenants are for local testing only — never seed fake tenants into a
   // real/production database. Opt in with SEED_DEMO=1.
   if (process.env.SEED_DEMO === '1') {
-    await seedTenants();
+    await seedTenants(property);
   } else {
     console.log('  (skipping demo tenants — set SEED_DEMO=1 to add sample data)');
   }

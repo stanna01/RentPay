@@ -1,11 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api, formatK, MONTHS } from '../api.js';
-import { Loading, useToast } from '../ui.jsx';
-
-function fmtDate(d) {
-  return new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-}
+import { Loading, useToast, fmtDate } from '../ui.jsx';
 function periodText(periods) {
   const sorted = [...periods].sort((a, b) => a.year - b.year || a.month - b.month);
   const name = (p) => `${MONTHS[p.month - 1]} ${p.year}`;
@@ -45,11 +41,31 @@ export default function ReceiptPreview() {
   };
 
   if (!r) return <Loading />;
+  const isVoid = r.status === 'VOID';
 
   return (
     <div className="flex flex-col gap-3.5 px-3.5 pb-6 pt-4">
+      {isVoid && (
+        <div className="rounded-xl border border-[#F2D7D0] bg-due-bg px-3.5 py-3 text-[13.5px] text-due-text">
+          <div className="font-bold">This receipt is VOID — it is no longer valid.</div>
+          <div>Voided {fmtDate(r.voidedAt)}. Reason: {r.voidReason}</div>
+          {r.replacedBy && (
+            <button onClick={() => navigate(`/receipt/${r.replacedBy.id}`)} className="mt-1 font-semibold underline">
+              See replacement receipt {r.replacedBy.receiptNumber}
+            </button>
+          )}
+        </div>
+      )}
+      {r.replaces && (
+        <div className="rounded-xl border border-line bg-white px-3.5 py-2.5 text-[13px] text-muted">
+          This receipt corrects{' '}
+          <button onClick={() => navigate(`/receipt/${r.replaces.id}`)} className="font-semibold text-ink underline">{r.replaces.receiptNumber}</button>
+          , which is now void.
+        </div>
+      )}
+
       {/* Paper receipt */}
-      <div className="rounded-[10px] border border-line bg-white px-5 py-6 shadow-paper">
+      <div className={'relative rounded-[10px] border border-line bg-white px-5 py-6 shadow-paper ' + (isVoid ? 'opacity-60' : '')}>
         <div className="border-b-2 border-brand pb-3.5">
           <div className="text-[17px] font-bold">{r.property.name}</div>
           {r.property.address && <div className="mt-0.5 text-xs text-muted">{r.property.address}</div>}
@@ -89,8 +105,9 @@ export default function ReceiptPreview() {
 
       {/* Actions */}
       <div className="flex flex-col gap-2">
-        <button onClick={email} disabled={busy || !r.tenant.email} className="btn-outline w-full text-[15.5px]">Email to tenant</button>
+        {!isVoid && <button onClick={email} disabled={busy || !r.tenant.email} className="btn-outline w-full text-[15.5px]">Email to tenant</button>}
         <button onClick={() => window.open(`/api/receipts/${id}/pdf`, '_blank')} className="btn-secondary w-full text-[15.5px]">Print</button>
+        <button onClick={() => navigate(`/tenancy/${r.tenancyId}`)} className="btn-secondary w-full text-[15.5px]">Tenant's records</button>
         <button onClick={() => navigate('/', { replace: true })} className="btn-primary w-full text-[15.5px]">Save &amp; done</button>
       </div>
     </div>

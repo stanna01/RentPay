@@ -1,140 +1,177 @@
 import { Router } from 'express';
-import { prisma, ensureSettings } from '../db.js';
-import { nextReceiptNumber, ensureReceiptCounter } from '../receiptNumber.js';
-import { allocatePayment } from '../status.js';
-import { appliedByMonth } from '../tenancyService.js';
-import { buildReceiptPdf } from '../pdf.js';
-import { queueAndSend, isSmtpConfigured } from '../email.js';
+import { prisma } from '../db.js';
+import { requireRole, ROLES } from '../auth.js';
+import { loadTenancy, loadPayment } from '../access.js';
+import { createPayment, voidPayment, METHODS } from '../paymentService.js';
+import { queueAndSend, isSmtpConfigured, notifyInBackground } from '../email.js';
+import { formatKwacha } from '../money.js';
+import { ACTIVE } from '../tenancyService.js';
+import { audit } from '../audit.js';
+import { parse, z, id, date, reason } from '../validate.js';
+import { badRequest, httpError } from '../httpError.js';
 
 const router = Router();
-const METHODS = new Set(['cash', 'mobile_money', 'bank']);
+const adminOnly = requireRole(ROLES.ADMIN);
+
+const paymentFields = {
+  amount: z.coerce
+    .number({ error: 'Please enter a payment amount.' })
+    .int('Amount must be whole ngwee.')
+    .positive('Please enter a payment amount greater than zero.')
+    .max(1_000_000_000, 'That amount is too large.'),
+  datePaid: date('Please enter a valid payment date.').optional(),
+  method: z.enum(METHODS).optional().default('cash'),
+  months: z
+    .array(
+      z.object({
+        month: z.coerce.number().int().min(1).max(12),
+        year: z.coerce.number().int().min(2000).max(2100),
+      }),
+      { error: 'Please select at least one month to pay for.' }
+    )
+    .min(1, 'Please select at least one month to pay for.')
+    .max(36, 'You can pay for at most 36 months at once.')
+    .refine((ms) => new Set(ms.map((m) => `${m.year}-${m.month}`)).size === ms.length, 'A month was selected twice.'),
+};
+
+async function maybeEmail(receiptId, tenant, sendEmail) {
+  if (!sendEmail || !tenant.email || !(await isSmtpConfigured())) return 'none';
+  await queueAndSend(receiptId);
+  const fresh = await prisma.receipt.findUnique({ where: { id: receiptId } });
+  return fresh.emailStatus;
+}
 
 /**
  * POST /api/payments
- * Body: {
- *   tenancyId, amount (ngwee), datePaid, method,
- *   months: [{ month, year }],   // periods to cover (order = fill order)
- *   sendEmail: bool
- * }
- * Creates payment + periods + receipt (atomic number) + PDF in one transaction,
- * then attempts to email the receipt (queued for retry on failure).
+ * Body: { tenancyId, amount (ngwee), datePaid, method, months: [{month, year}], sendEmail }
  */
 router.post('/', async (req, res) => {
-  const { tenancyId, amount, datePaid, method, months, sendEmail } = req.body || {};
-
-  const tenancy = await prisma.tenancy.findUnique({
-    where: { id: Number(tenancyId) },
-    include: { tenant: true, room: true },
-  });
-  if (!tenancy) return res.status(400).json({ error: 'Please choose a tenant.' });
-
-  const amt = Math.round(Number(amount));
-  if (!Number.isFinite(amt) || amt <= 0) {
-    return res.status(400).json({ error: 'Please enter a payment amount greater than zero.' });
-  }
-  if (!Array.isArray(months) || months.length === 0) {
-    return res.status(400).json({ error: 'Please select at least one month to pay for.' });
-  }
-  const pmethod = METHODS.has(method) ? method : 'cash';
-
-  // Resolve the expected rent + already-applied for each selected month.
-  const { applied: appliedMap, expected: expectedMap } = await appliedByMonth(tenancy.id);
-  const monthMeta = months.map((m) => {
-    const month = Number(m.month);
-    const year = Number(m.year);
-    if (!(month >= 1 && month <= 12) || !(year >= 2000 && year <= 3000)) {
-      throw Object.assign(new Error('A selected month is invalid.'), { status: 400 });
-    }
-    const key = `${year}-${month}`;
-    const fullExpected = expectedMap.has(key) ? expectedMap.get(key) : tenancy.monthlyRent;
-    const alreadyApplied = appliedMap.get(key) || 0;
-    const remainingRoom = Math.max(0, fullExpected - alreadyApplied);
-    return { month, year, fullExpected, alreadyApplied, remainingRoom };
-  });
-
-  // Allocate this payment across the remaining room of each selected month.
-  const { periods: allocated } = allocatePayment(
-    amt,
-    monthMeta.map((m) => ({ month: m.month, year: m.year, expectedRent: m.remainingRoom }))
+  const body = parse(
+    z.object({ tenancyId: id('Please choose a tenant.'), ...paymentFields, sendEmail: z.boolean().optional() }),
+    req.body
   );
-
-  // Build the period rows to store (full expected snapshot) + receipt view.
-  const periodRows = allocated.map((p, i) => ({
-    month: p.month,
-    year: p.year,
-    amountApplied: p.amountApplied,
-    expectedRent: monthMeta[i].fullExpected,
-  }));
-
-  const totalBalance = monthMeta.reduce((sum, m, i) => {
-    const bal = m.fullExpected - (m.alreadyApplied + periodRows[i].amountApplied);
-    return sum + Math.max(0, bal);
-  }, 0);
-
-  const year = new Date().getFullYear();
-  const settings = await ensureSettings();
-  await ensureReceiptCounter(prisma, year); // outside the txn to keep the hot path UPDATE-only
-
-  // --- Atomic: receipt number + payment + periods + receipt row --------------
-  const result = await prisma.$transaction(
-    async (tx) => {
-      const { receiptNumber } = await nextReceiptNumber(tx, year);
-      const payment = await tx.payment.create({
-        data: {
-          tenancyId: tenancy.id,
-          amount: amt,
-          datePaid: datePaid ? new Date(datePaid) : new Date(),
-          method: pmethod,
-          periods: { create: periodRows },
-        },
-      });
-      const receipt = await tx.receipt.create({
-        data: {
-          paymentId: payment.id,
-          receiptNumber,
-          emailStatus: 'none',
-        },
-      });
-      return { payment, receipt, receiptNumber };
-    },
-    { timeout: 20000, maxWait: 20000 }
-  );
-
-  // --- Build the PDF once and store its bytes in the DB ----------------------
-  const pdfBytes = await buildReceiptPdf({
-    receiptNumber: result.receiptNumber,
-    datePaid: result.payment.datePaid,
-    propertyName: settings.propertyName,
-    propertyAddress: settings.propertyAddress,
-    tenantName: tenancy.tenant.name,
-    roomLabel: `${tenancy.roomNumber}${tenancy.bed}`,
-    method: pmethod,
-    amount: amt,
-    periods: periodRows,
-    totalBalance,
-  });
-  await prisma.receipt.update({
-    where: { id: result.receipt.id },
-    data: { pdf: Buffer.from(pdfBytes) },
-  });
-
-  // --- Email (queued + retried on failure) -----------------------------------
-  let emailStatus = 'none';
-  if (sendEmail && tenancy.tenant.email && (await isSmtpConfigured())) {
-    await queueAndSend(result.receipt.id);
-    const fresh = await prisma.receipt.findUnique({ where: { id: result.receipt.id } });
-    emailStatus = fresh.emailStatus;
+  const tenancy = await loadTenancy(req, body.tenancyId);
+  const datePaid = body.datePaid || new Date();
+  if (datePaid < startOfMonth(tenancy.moveInDate)) {
+    throw badRequest('The payment date is before this tenant moved in.');
   }
+
+  const result = await createPayment({
+    tenancy,
+    amount: body.amount,
+    datePaid,
+    method: body.method,
+    months: body.months,
+    createdById: req.user.id,
+  });
+  await audit(req, 'payment.create', {
+    type: 'payment',
+    id: result.payment.id,
+    after: { ...result.payment, receiptNumber: result.receiptNumber, periods: result.periodRows },
+  });
 
   res.status(201).json({
     paymentId: result.payment.id,
     receiptId: result.receipt.id,
     receiptNumber: result.receiptNumber,
-    amount: amt,
-    totalBalance,
-    emailStatus,
-    periods: periodRows,
+    amount: body.amount,
+    totalBalance: result.totalBalance,
+    emailStatus: await maybeEmail(result.receipt.id, tenancy.tenant, body.sendEmail),
+    periods: result.periodRows,
   });
 });
+
+/**
+ * POST /api/payments/:id/void — admin: cancel a payment. It stops counting
+ * toward balances and reports; its receipt keeps its number and gets a VOID
+ * copy. Body: { reason, notifyTenant? }
+ */
+router.post('/:id/void', adminOnly, async (req, res) => {
+  const payment = await loadPayment(req, req.params.id);
+  const body = parse(z.object({ reason: reason(), notifyTenant: z.boolean().optional() }), req.body);
+  if (payment.status !== ACTIVE) throw httpError(409, 'That payment has already been voided.');
+
+  await voidPayment({ paymentId: payment.id, reason: body.reason, userId: req.user.id });
+  await audit(req, 'payment.void', {
+    type: 'payment',
+    id: payment.id,
+    before: { status: payment.status, amount: payment.amount, receiptNumber: payment.receipt?.receiptNumber },
+    after: { status: 'VOID', reason: body.reason },
+  });
+
+  const tenant = payment.tenancy.tenant;
+  if (body.notifyTenant && payment.receipt) {
+    notifyInBackground(
+      tenant.email,
+      `Receipt ${payment.receipt.receiptNumber} has been cancelled — ${payment.tenancy.room.property.name}`,
+      `Dear ${tenant.name},\n\nReceipt ${payment.receipt.receiptNumber} for ${formatKwacha(payment.amount)} has been cancelled ` +
+        `and is no longer valid.\nReason: ${body.reason}\n\nRegards,\n${payment.tenancy.room.property.name}`
+    );
+  }
+  res.json({ ok: true, paymentId: payment.id, status: 'VOID' });
+});
+
+/**
+ * POST /api/payments/:id/correct — admin: "edit" a payment. In one transaction
+ * the original is voided and a replacement with a NEW receipt number is issued.
+ * Body: { amount, datePaid, method, months, reason, sendEmail? }
+ */
+router.post('/:id/correct', adminOnly, async (req, res) => {
+  const original = await loadPayment(req, req.params.id);
+  const body = parse(
+    z.object({ ...paymentFields, reason: reason(), sendEmail: z.boolean().optional() }),
+    req.body
+  );
+  if (original.status !== ACTIVE) throw httpError(409, 'That payment has already been voided or corrected.');
+  const tenancy = await loadTenancy(req, original.tenancyId);
+  const datePaid = body.datePaid || original.datePaid;
+  if (datePaid < startOfMonth(tenancy.moveInDate)) {
+    throw badRequest('The payment date is before this tenant moved in.');
+  }
+
+  const result = await createPayment({
+    tenancy,
+    amount: body.amount,
+    datePaid,
+    method: body.method,
+    months: body.months,
+    createdById: req.user.id,
+    replaces: { paymentId: original.id, reason: body.reason, userId: req.user.id },
+  });
+  await audit(req, 'payment.correct', {
+    type: 'payment',
+    id: original.id,
+    before: {
+      amount: original.amount,
+      datePaid: original.datePaid,
+      method: original.method,
+      periods: original.periods,
+      receiptNumber: original.receipt?.receiptNumber,
+    },
+    after: {
+      replacementPaymentId: result.payment.id,
+      amount: body.amount,
+      datePaid,
+      method: body.method,
+      periods: result.periodRows,
+      receiptNumber: result.receiptNumber,
+      reason: body.reason,
+    },
+  });
+
+  res.status(201).json({
+    paymentId: result.payment.id,
+    receiptId: result.receipt.id,
+    receiptNumber: result.receiptNumber,
+    replacedPaymentId: original.id,
+    totalBalance: result.totalBalance,
+    emailStatus: await maybeEmail(result.receipt.id, tenancy.tenant, body.sendEmail),
+  });
+});
+
+function startOfMonth(d) {
+  const x = new Date(d);
+  return new Date(x.getFullYear(), x.getMonth(), 1);
+}
 
 export default router;
