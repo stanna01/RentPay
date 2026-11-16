@@ -1,15 +1,13 @@
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
-import { requireRole, ROLES, isAdmin } from '../auth.js';
 import { loadRoom, loadTenancy, loadTenant, propertyFilter, assertPropertyAccess } from '../access.js';
 import { buildTenancyProfile, bedLabels, roomLabel, ACTIVE } from '../tenancyService.js';
 import { audit } from '../audit.js';
 import { parse, z, text, optionalEmail, ngwee, date, id, reason } from '../validate.js';
-import { badRequest, forbidden, httpError, notFound } from '../httpError.js';
+import { badRequest, httpError, notFound } from '../httpError.js';
 
 const router = Router();
-const adminOnly = requireRole(ROLES.ADMIN);
 
 const bedKey = (roomId, bed) => `${roomId}-${bed}`;
 const BED_TAKEN = 'That bed is already occupied.';
@@ -102,7 +100,7 @@ router.get('/past', async (req, res) => {
       moveOutDate: { not: null },
       archivedAt: archived ? { not: null } : null,
       tenant: { deletedAt: null },
-      room: { propertyId: propertyId ?? (filter.in ? filter : undefined) },
+      room: { propertyId: propertyId ?? filter },
     },
     include: {
       tenant: true,
@@ -125,8 +123,8 @@ router.get('/past', async (req, res) => {
   );
 });
 
-/** POST /api/tenancies/adjustments/:adjId/reverse — admin: undo a waiver/charge. */
-router.post('/adjustments/:adjId/reverse', adminOnly, async (req, res) => {
+/** POST /api/tenancies/adjustments/:adjId/reverse — undo a waiver/charge. */
+router.post('/adjustments/:adjId/reverse', async (req, res) => {
   const adjId = Number(req.params.adjId);
   const adj = Number.isInteger(adjId) ? await prisma.arrearsAdjustment.findUnique({ where: { id: adjId } }) : null;
   if (!adj) throw notFound('Adjustment not found.');
@@ -143,10 +141,7 @@ router.get('/:id', async (req, res) => {
   res.json(await buildTenancyProfile(tenancy.id));
 });
 
-/**
- * PATCH /api/tenancies/:id — rent (anyone with access); move-in / move-out
- * dates (admin only — these change what is owed).
- */
+/** PATCH /api/tenancies/:id — rent, move-in date, and (after move-out) the move-out date. */
 router.patch('/:id', async (req, res) => {
   const tenancy = await loadTenancy(req, req.params.id);
   const body = parse(
@@ -157,9 +152,6 @@ router.patch('/:id', async (req, res) => {
     }),
     req.body
   );
-  if ((body.moveInDate || body.moveOutDate) && !isAdmin(req.user)) {
-    throw forbidden('Only an administrator can change tenancy dates.');
-  }
   if (body.moveOutDate && !tenancy.moveOutDate) {
     throw badRequest('Use "Move out" to end a current tenancy.');
   }
@@ -188,8 +180,8 @@ router.post('/:id/moveout', async (req, res) => {
   res.json(updated);
 });
 
-/** POST /api/tenancies/:id/undo-moveout — admin: reverse a mistaken move-out. */
-router.post('/:id/undo-moveout', adminOnly, async (req, res) => {
+/** POST /api/tenancies/:id/undo-moveout — reverse a mistaken move-out. */
+router.post('/:id/undo-moveout', async (req, res) => {
   const tenancy = await loadTenancy(req, req.params.id);
   if (!tenancy.moveOutDate) throw badRequest('This tenant has not moved out.');
   if (tenancy.room.archivedAt) throw badRequest('That room has been removed.');
@@ -225,10 +217,10 @@ router.post('/:id/unarchive', async (req, res) => {
 });
 
 /**
- * POST /api/tenancies/:id/adjustments — admin: waive (negative amount) or add a
+ * POST /api/tenancies/:id/adjustments — waive (negative amount) or add a
  * charge (positive amount) to one month's rent, with a required reason.
  */
-router.post('/:id/adjustments', adminOnly, async (req, res) => {
+router.post('/:id/adjustments', async (req, res) => {
   const tenancy = await loadTenancy(req, req.params.id);
   const body = parse(
     z.object({

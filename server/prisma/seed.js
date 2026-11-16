@@ -1,7 +1,7 @@
-// Seed: the first admin + one property with 24 rooms (2 beds each = 48 beds) +,
-// optionally, a realistic set of tenants with payment history, receipts and
-// PDFs, mirroring the mobile design's demo (some beds vacant, some partial,
-// some due).
+// Seed: the super admin (who then creates landlords in the app). With
+// SEED_DEMO=1 it also adds a demo landlord with one property of 24 rooms
+// (2 beds each = 48 beds) and a realistic set of tenants with payment history,
+// receipts and PDFs (some beds vacant, some partial, some due).
 
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
@@ -33,13 +33,13 @@ async function seedAdmin() {
     await prisma.user.create({
       data: {
         email,
-        name: 'Administrator',
-        role: 'ADMIN',
+        name: 'Platform administrator',
+        role: 'SUPER_ADMIN',
         passwordHash: await bcrypt.hash(password, 12),
         mustChangePassword: true, // the seeded password must be replaced at first sign-in
       },
     });
-    console.log(`  Admin created: ${email} (temporary password from .env — must be changed at first sign-in)`);
+    console.log(`  Super admin created: ${email} (temporary password from .env — must be changed at first sign-in)`);
   } else {
     console.log(`  User already exists: ${email}`);
   }
@@ -52,18 +52,39 @@ async function seedSettings() {
       data: {
         id: 1,
         landlordEmail: (process.env.ADMIN_EMAIL || process.env.LANDLORD_EMAIL || '').toLowerCase(),
-        smtpFromName: 'Kabulonga Court',
+        smtpFromName: 'RentReceipt',
       },
     });
     console.log('  Settings created.');
   }
 }
 
-async function seedProperty() {
-  let property = await prisma.property.findFirst({ orderBy: { id: 'asc' } });
+/** Demo only: a landlord business, its sign-in account and one property. */
+async function seedDemoLandlord() {
+  const email = (process.env.DEMO_LANDLORD_EMAIL || 'landlord@example.com').toLowerCase();
+  let org = await prisma.organization.findFirst({ where: { name: 'Kabulonga Court (demo)' } });
+  if (!org) {
+    org = await prisma.organization.create({ data: { name: 'Kabulonga Court (demo)' } });
+    console.log('  Demo landlord created: Kabulonga Court (demo).');
+  }
+  if (!(await prisma.user.findUnique({ where: { email } }))) {
+    await prisma.user.create({
+      data: {
+        email,
+        name: 'Demo Landlord',
+        role: 'LANDLORD',
+        organizationId: org.id,
+        passwordHash: await bcrypt.hash(process.env.ADMIN_PASSWORD || process.env.LANDLORD_PASSWORD, 12),
+        mustChangePassword: true,
+      },
+    });
+    console.log(`  Demo landlord sign-in: ${email} (same temporary password as the super admin — must be changed at first sign-in)`);
+  }
+
+  let property = await prisma.property.findFirst({ where: { organizationId: org.id }, orderBy: { id: 'asc' } });
   if (!property) {
     property = await prisma.property.create({
-      data: { name: 'Kabulonga Court', address: 'Plot 14, Kabulonga Road, Lusaka', code: 'KC' },
+      data: { organizationId: org.id, name: 'Kabulonga Court', address: 'Plot 14, Kabulonga Road, Lusaka', code: 'KC' },
     });
     console.log('  Property created: Kabulonga Court (code KC).');
   }
@@ -214,18 +235,17 @@ async function seedTenants(property) {
 }
 
 async function main() {
-  console.log('Seeding RentReceipt (admin + property with 24 rooms / 48 beds)...');
+  console.log('Seeding RentReceipt...');
   await seedAdmin();
   await seedSettings();
-  const property = await seedProperty();
-  // Demo tenants are for local testing only — never seed fake tenants into a
-  // real/production database. Opt in with SEED_DEMO=1.
+  // Demo data is for local testing only — never seed it into a real/production
+  // database. Opt in with SEED_DEMO=1.
   if (process.env.SEED_DEMO === '1') {
-    await seedTenants(property);
+    await seedTenants(await seedDemoLandlord());
   } else {
-    console.log('  (skipping demo tenants — set SEED_DEMO=1 to add sample data)');
+    console.log('  (no demo landlord — set SEED_DEMO=1 to add one with sample data)');
   }
-  console.log('Seed complete.');
+  console.log('Seed complete. Sign in as the super admin and add landlords under "Landlords".');
 }
 
 main()

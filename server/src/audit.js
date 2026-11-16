@@ -21,13 +21,15 @@ function clean(value) {
  * Record an action. Failures are logged but never break the user's request.
  * @param {import('express').Request|null} req
  * @param {string} action   e.g. "payment.void", "user.create", "login.failed"
- * @param {{type?: string, id?: any, before?: any, after?: any, userId?: number|null}} details
+ * @param {{type?: string, id?: any, before?: any, after?: any, userId?: number|null, organizationId?: number|null}} details
+ *        organizationId defaults to the signed-in user's landlord business.
  */
-export async function audit(req, action, { type = '', id = '', before = null, after = null, userId } = {}) {
+export async function audit(req, action, { type = '', id = '', before = null, after = null, userId, organizationId } = {}) {
   try {
     await prisma.auditLog.create({
       data: {
         userId: userId !== undefined ? userId : req?.user?.id ?? null,
+        organizationId: organizationId !== undefined ? organizationId : req?.user?.organizationId ?? null,
         action,
         entityType: type,
         entityId: id == null ? '' : String(id),

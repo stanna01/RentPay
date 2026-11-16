@@ -1,4 +1,4 @@
-// Global email/SMTP settings (admin only — mounted behind requireRole('ADMIN')).
+// Platform-wide email/SMTP settings (super admin only — see app.js).
 // Property names and addresses live on each Property (routes/properties.js).
 
 import { Router } from 'express';

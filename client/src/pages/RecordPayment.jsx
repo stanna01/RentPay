@@ -54,7 +54,7 @@ function monthWindow(profile) {
 export default function RecordPayment() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { propertyId, isAdmin } = useAuth();
+  const { propertyId, isOwner } = useAuth();
   const [params] = useSearchParams();
   const preId = params.get('tenancyId');
   const correctId = params.get('correct'); // admin: payment id being corrected
@@ -156,7 +156,7 @@ export default function RecordPayment() {
   };
 
   if (loading) return <Loading />;
-  if (correctId && !isAdmin) return <EmptyState icon="🔒" title="Admins only" message="Only an administrator can correct a payment." />;
+  if (correctId && !isOwner) return <EmptyState icon="🔒" title="Not allowed" message="You do not have permission to correct a payment." />;
   if (correctId && profile && !correcting)
     return <EmptyState icon="🧾" title="Payment not found" message="That payment may already have been corrected or voided." />;
   if (!correctId && options.length === 0)

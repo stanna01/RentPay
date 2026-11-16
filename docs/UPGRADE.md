@@ -1,4 +1,29 @@
-# UPGRADE — Admin, multi-property & security release
+# UPGRADE — Many landlords (super admin) release
+
+This release adds landlord businesses. Roles are now **super admin** (runs the
+platform) and **landlord** (runs one business); the old per-user list of
+allowed properties is gone.
+
+**Nothing was deployed with real records when this was written, so the simple
+path is a fresh database:**
+
+```bash
+npm install
+npm run db:reset        # ⚠️ deletes everything in the database, then re-creates and seeds it
+```
+
+(`SEED_DEMO=1 npm run db:seed` afterwards adds a demo landlord with sample data.)
+
+If you do have data to keep, back up first ([BACKUP.md](./BACKUP.md)) and run
+`npm run db:migrate` instead. The migration `20261116000000_multi_landlord`
+then puts every existing property under one landlord business called "First
+landlord", turns old administrators into super admins, and attaches old
+landlord accounts to that business. Everyone is signed out. **This path has not
+been run against a real database yet — rehearse it on a copy first.**
+
+---
+
+# Earlier: Admin, multi-property & security release
 
 This release changes the database structure. **Your existing data is kept**: the
 upgrade was rehearsed against a copy of the old schema, with tenants, payments,

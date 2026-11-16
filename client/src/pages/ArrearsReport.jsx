@@ -7,7 +7,7 @@ import { useAuth } from '../auth.jsx';
 export default function ArrearsReport() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { propertyId, properties, isAdmin } = useAuth();
+  const { propertyId, properties, isOwner } = useAuth();
   const [scope, setScope] = useState('current');
   const [includePast, setIncludePast] = useState(false);
   const [data, setData] = useState(null);
@@ -66,7 +66,7 @@ export default function ArrearsReport() {
           </div>
 
           <a href={`/api/reports/arrears${qs({ ...params, format: 'csv' })}`} className="btn-secondary w-full">⬇️ Export CSV</a>
-          {isAdmin && <p className="px-1 text-xs text-muted">To waive rent or add a charge, open the tenant and tap "Adjust" on a month.</p>}
+          {isOwner && <p className="px-1 text-xs text-muted">To waive rent or add a charge, open the tenant and tap "Adjust" on a month.</p>}
         </>
       )}
     </div>

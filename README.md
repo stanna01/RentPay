@@ -1,13 +1,15 @@
 # RentReceipt 🧾
 
-A mobile-first **PWA** for landlords to manage one or more properties (rooms with
-one or more beds each) in Zambia: track tenants, record rent payments in
+A mobile-first **PWA** for landlords in Zambia to manage their properties (rooms
+with one or more beds each): track tenants, record rent payments in
 **Zambian Kwacha (K)**, and issue sequential PDF receipts that are emailed to
-tenants.
+tenants. **Many independent landlords** share one installation, and none of them
+can see another's data.
 
-Two roles: **Administrators** (full control, including voiding/correcting
-payments, users, properties and the audit log) and **Landlords** (day-to-day work
-on the properties they are given). Tenants never log in — they only receive
+Two roles: the **super admin** runs the platform (adds and suspends landlords,
+email settings, the audit log across all landlords) and **landlords** each run
+their own business (properties, rooms, tenants, payments, voids and corrections,
+reports, their own audit log). Tenants never log in — they only receive
 receipt emails. See [docs/SECURITY.md](docs/SECURITY.md) for how the app is
 protected, and [docs/UPGRADE.md](docs/UPGRADE.md) before upgrading an existing
 installation.
@@ -18,8 +20,10 @@ installation.
 
 - 📱 **Installable PWA**, mobile-first, large touch targets, works offline for
   viewing.
+- 🏘️ **Many landlords** — the super admin adds each landlord business; every
+  landlord sees only their own properties, tenants and money.
 - 🏢 **Multiple properties** — each with its own rooms, tenants and receipt numbers.
-- 🛡️ **Admin** — users & roles, void/correct payments (never deleted), arrears
+- 🛡️ **Safe records** — void/correct payments (never deleted), arrears
   waivers/charges, append-only audit log.
 - 🏠 **Room board** — every room with its beds (A/B…), colour-coded status
   (paid / part-paid / due / vacant) and month navigation.
@@ -55,13 +59,14 @@ In production the Express server serves both the API and the built React app as 
 npm install
 cp .env.example server/.env      # then edit server/.env (set your MySQL DATABASE_URL)
 npm run db:migrate               # create the MySQL tables
-npm run db:seed                  # first admin + property with 24 rooms (SEED_DEMO=1 for sample data)
+npm run db:seed                  # the super admin (SEED_DEMO=1 adds a demo landlord with sample data)
 npm run dev                      # http://localhost:5173
 npm test                         # business-logic + concurrency tests
 ```
 
-Log in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `server/.env`; you'll be asked
-to choose your own password straight away.
+Log in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `server/.env` (the super admin);
+you'll be asked to choose your own password straight away. Then add a landlord under
+**Landlords** and sign in as that landlord to add properties and tenants.
 
 Full details: **[docs/SETUP.md](docs/SETUP.md)**.
 
@@ -88,7 +93,9 @@ RentReceipt/
 ├─ server/                Express API + Prisma + PDF + email
 │  ├─ prisma/             schema, migrations, seed
 │  ├─ src/
-│  │  ├─ routes/          auth, rooms, tenants, tenancies, payments, receipts, reports, settings
+│  │  ├─ routes/          auth, admin (landlords), properties, rooms, tenants, tenancies,
+│  │  │                   payments, receipts, reports, settings, audit, v1 (phone app)
+│  │  ├─ access.js        keeps each landlord to their own data
 │  │  ├─ money.js         ngwee <-> Kwacha, amount-in-words
 │  │  ├─ status.js        month status + payment allocation + duration
 │  │  ├─ receiptNumber.js atomic sequential numbering
@@ -98,7 +105,7 @@ RentReceipt/
 ├─ client/                React + Vite PWA
 │  └─ src/pages/          Login, Dashboard, TenantProfile, AssignTenant,
 │                         RecordPayment, ReceiptPreview, Reports, Settings
-├─ mobile/                Android + iPhone app (Expo, TypeScript) — demo data for now
+├─ mobile/                Android + iPhone app (Expo, TypeScript) — demo data; live for landlords
 └─ docs/                  the guides above
 ```
 

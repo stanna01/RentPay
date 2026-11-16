@@ -14,7 +14,7 @@ It also lists what is still left to do.
 
 | Threat (OWASP) | Protection in RentReceipt | Where |
 | --- | --- | --- |
-| **A01 Broken access control** | Every request is checked on the server for both **role** (Admin/Landlord) and **property ownership**. Anything outside your properties returns *404 Not found*, so the app never confirms it exists. Hiding buttons in the app is only cosmetic. | `server/src/access.js`, `requireRole` in `auth.js` |
+| **A01 Broken access control** | Every request is checked on the server for both **role** (super admin / landlord) and **ownership**: a landlord reaches only the properties of their own business, and the super admin manages landlords but not their tenants or payments. Anything belonging to another landlord returns *404 Not found*, so the app never confirms it exists. Suspending a landlord ends their sessions at once. Hiding buttons in the app is only cosmetic. | `server/src/access.js`, `requireRole` in `auth.js` |
 | **A02 Cryptographic failures** | Passwords hashed with bcrypt (cost 12; old hashes upgrade at the next sign-in). The SMTP password is encrypted with AES-256-GCM under its own `ENCRYPTION_KEY`. HTTPS is enforced with HSTS and `upgrade-insecure-requests`. Cookies are `Secure` in production. | `auth.js`, `crypto.js`, `app.js` |
 | **A03 Injection** | Prisma parameterises every query. All input is checked against a schema (zod) before use. CSV exports neutralise spreadsheet formulas (`=`, `+`, `-`, `@`). | `validate.js`, `routes/reports.js` |
 | **A04 Insecure design** | Payments are **never deleted**: they are voided or corrected, with a required reason. A database constraint makes double-booking a bed impossible. There must always be one active admin. Admins can't demote or remove themselves. | `paymentService.js`, `routes/tenancies.js`, `routes/admin.js` |
@@ -33,7 +33,7 @@ It also lists what is still left to do.
 - Each further lockout doubles the time (30 minutes, 1 hour, and so on), up to **24 hours**.
 - The level drops back to normal after 24 hours with no failures.
 - While locked, even the correct password is refused.
-- An admin can unlock an account, and a password reset also clears the lock.
+- The super admin can unlock an account, and a password reset also clears the lock.
 
 Before this release, the only limit was 20 attempts per 15 minutes per IP address. An attacker using several IP addresses could keep guessing indefinitely.
 
@@ -60,7 +60,9 @@ Before this release, the only limit was 20 attempts per 15 minutes per IP addres
 - Every session is revoked when a user changes or resets their password, is deactivated, has their role changed, or chooses **"Sign out of all devices"**. This works through a `tokenVersion` counter on the user.
 - The token algorithm is fixed to HS256.
 
-**Temporary passwords:** new users, admin-issued resets and the first seeded admin all must choose their own password before the API lets them do anything else.
+**Temporary passwords:** new landlords, resets issued by the super admin and the seeded super admin all must choose their own password before the API lets them do anything else.
+
+**Phone app:** the app signs in with a 15-minute access token and a 60-day refresh token (sent as `Authorization: Bearer`, kept in the phone's secure storage). They are not stored on the server; changing the password or "sign out everywhere" ends them. Signing out one lost phone on its own is not possible yet.
 
 ## Review of the original requirements against best practice
 
@@ -90,7 +92,7 @@ Before this release, the only limit was 20 attempts per 15 minutes per IP addres
 
 - **Upgrade `nodemailer` to v10.** `npm audit` reports high-severity advisories for v6, including possible email header injection and DoS through crafted addresses. It is a major-version change, so test sending receipts after upgrading.
 - **Upgrade `react-router-dom` to v7.** There is a moderate open-redirect advisory. It is not exploitable here, because the app only navigates to fixed internal paths.
-- **Two-factor sign-in (TOTP) for administrators.** This is recommended for privileged accounts.
+- **Two-factor sign-in (TOTP) for the super admin.** This is recommended for privileged accounts.
 - **Shared rate-limit store** (for example Redis), but only if you ever run more than one server process. The limiter currently keeps counts in memory.
 - **Encrypted, tested backups.** See [BACKUP.md](./BACKUP.md), and run a restore test regularly.
 

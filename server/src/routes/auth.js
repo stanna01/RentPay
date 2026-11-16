@@ -11,7 +11,7 @@ import {
   requireAuth,
   makeResetToken,
   verifyResetToken,
-  isAdmin,
+  canSignIn,
 } from '../auth.js';
 import { isSmtpConfigured, sendPasswordResetEmail, notifyInBackground } from '../email.js';
 import {
@@ -24,11 +24,12 @@ import {
 import { passwordProblem } from '../passwordPolicy.js';
 import { audit } from '../audit.js';
 import { appUrl } from '../config.js';
+import { httpError, badRequest } from '../httpError.js';
 
 const router = Router();
 
 // Per-IP limits (on top of the per-account lockout in loginThrottle.js).
-const loginLimiter = rateLimit({
+export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   limit: 10,
   skipSuccessfulRequests: true, // only failed attempts count
@@ -46,47 +47,53 @@ const resetLimiter = rateLimit({
 
 /** The current user as the client sees it. */
 export async function publicUser(user) {
-  const properties = await prisma.property.findMany({
-    where: {
-      archivedAt: null,
-      ...(isAdmin(user) ? {} : { access: { some: { userId: user.id } } }),
-    },
-    select: { id: true, name: true, code: true, address: true },
-    orderBy: { id: 'asc' },
-  });
+  const [organization, properties] = user.organizationId
+    ? await Promise.all([
+        prisma.organization.findUnique({ where: { id: user.organizationId }, select: { id: true, name: true } }),
+        prisma.property.findMany({
+          where: { organizationId: user.organizationId, archivedAt: null },
+          select: { id: true, name: true, code: true, address: true },
+          orderBy: { id: 'asc' },
+        }),
+      ])
+    : [null, []];
   return {
     id: user.id,
     email: user.email,
     name: user.name,
     role: user.role,
     mustChangePassword: user.mustChangePassword,
+    organization,
     properties,
   };
 }
 
-router.post('/login', loginLimiter, async (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Please enter your email and password.' });
-  }
+/**
+ * Check an email + password (with lockout, timing equalisation and audit) and
+ * return the user. Throws a friendly httpError otherwise. Shared by the web
+ * sign-in below and the phone app's sign-in (routes/v1.js).
+ */
+export async function signInWithPassword(req, email, password) {
+  if (!email || !password) throw badRequest('Please enter your email and password.');
   const key = normaliseEmail(email);
 
   // Locked? Refuse before even checking the password.
   const lockedMs = await getLockRemainingMs(key);
   if (lockedMs > 0) {
     await audit(req, 'login.blocked', { type: 'email', id: key, userId: null });
-    return res.status(423).json({ error: lockMessage(lockedMs), lockedForMs: lockedMs });
+    throw httpError(423, lockMessage(lockedMs));
   }
 
-  const user = await prisma.user.findUnique({ where: { email: key } });
+  const user = await prisma.user.findUnique({ where: { email: key }, include: { organization: true } });
   // Always run bcrypt so response time doesn't reveal whether the email exists.
   const ok = await verifyPassword(password, user?.passwordHash || DUMMY_HASH);
+  const who = { userId: user?.id ?? null, organizationId: user?.organizationId ?? null };
 
   if (!user || !ok) {
     const { lockedNow, remainingMs } = await recordFailure(key);
-    await audit(req, 'login.failed', { type: 'email', id: key, userId: user?.id ?? null });
+    await audit(req, 'login.failed', { type: 'email', id: key, ...who });
     if (lockedNow) {
-      await audit(req, 'login.locked', { type: 'email', id: key, userId: user?.id ?? null });
+      await audit(req, 'login.locked', { type: 'email', id: key, ...who });
       if (user) {
         notifyInBackground(
           user.email,
@@ -95,23 +102,28 @@ router.post('/login', loginLimiter, async (req, res) => {
             "If this wasn't you, reset your password now and tell your administrator."
         );
       }
-      return res.status(423).json({ error: lockMessage(remainingMs), lockedForMs: remainingMs });
+      throw httpError(423, lockMessage(remainingMs));
     }
-    return res.status(401).json({ error: 'Incorrect email or password.' });
+    throw httpError(401, 'Incorrect email or password.');
   }
 
-  if (!user.isActive) {
-    await audit(req, 'login.disabled', { type: 'user', id: user.id, userId: user.id });
-    return res.status(403).json({ error: 'This account has been disabled. Please contact your administrator.' });
+  if (!canSignIn(user)) {
+    await audit(req, 'login.disabled', { type: 'user', id: user.id, ...who });
+    throw httpError(403, 'This account has been disabled. Please contact your administrator.');
   }
 
   await clearThrottle(key);
   const data = { lastLoginAt: new Date() };
   if (needsRehash(user.passwordHash)) data.passwordHash = await hashPassword(password);
-  const fresh = await prisma.user.update({ where: { id: user.id }, data });
-  issueCookie(res, fresh);
-  await audit(req, 'login.success', { type: 'user', id: user.id, userId: user.id });
-  res.json(await publicUser(fresh));
+  const fresh = await prisma.user.update({ where: { id: user.id }, data, include: { organization: true } });
+  await audit(req, 'login.success', { type: 'user', id: user.id, ...who });
+  return fresh;
+}
+
+router.post('/login', loginLimiter, async (req, res) => {
+  const user = await signInWithPassword(req, req.body?.email, req.body?.password);
+  issueCookie(res, user);
+  res.json(await publicUser(user));
 });
 
 router.post('/logout', (req, res) => {
@@ -152,7 +164,7 @@ router.post('/forgot-password', resetLimiter, async (req, res) => {
       // The link is built ONLY from the configured APP_URL — never from request
       // headers, which an attacker controls (host-header poisoning).
       const link = `${appUrl()}/reset?token=${encodeURIComponent(token)}`;
-      await audit(req, 'password.reset_requested', { type: 'user', id: user.id, userId: user.id });
+      await audit(req, 'password.reset_requested', { type: 'user', id: user.id, userId: user.id, organizationId: user.organizationId });
       if (process.env.NODE_ENV !== 'production') {
         console.log(`[password reset] (dev only) link for ${user.email}:\n  ${link}`);
       }
@@ -174,7 +186,7 @@ async function applyNewPassword(req, user, newPassword, action) {
     },
   });
   await clearThrottle(user.email);
-  await audit(req, action, { type: 'user', id: user.id, userId: user.id });
+  await audit(req, action, { type: 'user', id: user.id, userId: user.id, organizationId: user.organizationId });
   notifyInBackground(
     user.email,
     'Your RentReceipt password was changed',

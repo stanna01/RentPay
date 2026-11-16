@@ -82,12 +82,12 @@ test('lockout: emails are normalised so case/space tricks share one counter', ()
 
 // --- Password policy -----------------------------------------------------------
 
-test('password: landlord needs 8+, admin needs 12+', () => {
+test('password: landlord needs 8+, super admin needs 12+', () => {
   assert.match(passwordProblem('short1', { role: 'LANDLORD' }), /at least 8/);
   assert.equal(passwordProblem('tenant-house-42', { role: 'LANDLORD' }), null);
-  assert.equal(passwordProblem('house-key-42', { role: 'ADMIN' }), null); // exactly 12
-  assert.match(passwordProblem('house-key-4', { role: 'ADMIN' }), /at least 12/);
-  assert.equal(passwordProblem('blue-house-key-42', { role: 'ADMIN' }), null);
+  assert.equal(passwordProblem('house-key-42', { role: 'SUPER_ADMIN' }), null); // exactly 12
+  assert.match(passwordProblem('house-key-4', { role: 'SUPER_ADMIN' }), /at least 12/);
+  assert.equal(passwordProblem('blue-house-key-42', { role: 'SUPER_ADMIN' }), null);
 });
 
 test('password: common passwords are rejected regardless of case', () => {

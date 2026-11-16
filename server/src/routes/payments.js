@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { prisma } from '../db.js';
-import { requireRole, ROLES } from '../auth.js';
 import { loadTenancy, loadPayment } from '../access.js';
 import { createPayment, voidPayment, METHODS } from '../paymentService.js';
 import { queueAndSend, isSmtpConfigured, notifyInBackground } from '../email.js';
@@ -11,7 +10,6 @@ import { parse, z, id, date, reason } from '../validate.js';
 import { badRequest, httpError } from '../httpError.js';
 
 const router = Router();
-const adminOnly = requireRole(ROLES.ADMIN);
 
 const paymentFields = {
   amount: z.coerce
@@ -82,11 +80,11 @@ router.post('/', async (req, res) => {
 });
 
 /**
- * POST /api/payments/:id/void — admin: cancel a payment. It stops counting
+ * POST /api/payments/:id/void — cancel a payment. It stops counting
  * toward balances and reports; its receipt keeps its number and gets a VOID
  * copy. Body: { reason, notifyTenant? }
  */
-router.post('/:id/void', adminOnly, async (req, res) => {
+router.post('/:id/void', async (req, res) => {
   const payment = await loadPayment(req, req.params.id);
   const body = parse(z.object({ reason: reason(), notifyTenant: z.boolean().optional() }), req.body);
   if (payment.status !== ACTIVE) throw httpError(409, 'That payment has already been voided.');
@@ -112,11 +110,11 @@ router.post('/:id/void', adminOnly, async (req, res) => {
 });
 
 /**
- * POST /api/payments/:id/correct — admin: "edit" a payment. In one transaction
+ * POST /api/payments/:id/correct — "edit" a payment. In one transaction
  * the original is voided and a replacement with a NEW receipt number is issued.
  * Body: { amount, datePaid, method, months, reason, sendEmail? }
  */
-router.post('/:id/correct', adminOnly, async (req, res) => {
+router.post('/:id/correct', async (req, res) => {
   const original = await loadPayment(req, req.params.id);
   const body = parse(
     z.object({ ...paymentFields, reason: reason(), sendEmail: z.boolean().optional() }),

@@ -8,7 +8,7 @@ import { useAuth } from '../auth.jsx';
 export default function Reports() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { propertyId, properties, isAdmin } = useAuth();
+  const { propertyId, properties, isOwner } = useAuth();
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [scope, setScope] = useState('current'); // 'current' | 'all'
@@ -23,7 +23,7 @@ export default function Reports() {
       .then(setData)
       .catch((e) => toast.error(e.message))
       .finally(() => setLoading(false));
-    if (isAdmin) api.get(`/reports/voids${qs({ year, propertyId: scopeParam })}`).then(setVoids).catch(() => setVoids([]));
+    if (isOwner) api.get(`/reports/voids${qs({ year, propertyId: scopeParam })}`).then(setVoids).catch(() => setVoids([]));
   }, [year, scopeParam]);
 
   const chartData = data?.rows.map((r) => ({ name: r.label, value: r.kwacha })) || [];
@@ -107,7 +107,7 @@ export default function Reports() {
 
           <a href={`/api/reports/income${qs({ year, propertyId: scopeParam, format: 'csv' })}`} className="btn-secondary w-full">⬇️ Export CSV</a>
 
-          {isAdmin && voids && (
+          {isOwner && voids && (
             <div className="card overflow-hidden">
               <div className="border-b border-line px-4 py-3 text-[15px] font-bold">Voided payments in {year}</div>
               {voids.length === 0 ? (

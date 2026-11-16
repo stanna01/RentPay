@@ -79,7 +79,7 @@ ADMIN_PASSWORD="<a temporary password — you must change it at first sign-in>"
 
 ```bash
 npm run db:migrate --workspace server   # applies migrations (prisma migrate deploy)
-npm run db:seed --workspace server      # creates the first admin + a property with 24 rooms
+npm run db:seed --workspace server      # creates the super admin
 ```
 
 > On later deploys run only `db:migrate` — **never** `db:reset` in production
@@ -172,7 +172,7 @@ Both build from your repo and run one web service.
 ### First deploy
 
 The start command runs `prisma migrate deploy` on every boot (safe/idempotent).
-To create the first admin + property once, run a one-off command in the platform
+To create the super admin once, run a one-off command in the platform
 shell:
 
 ```bash
@@ -187,8 +187,8 @@ npm run db:seed --workspace server
 - [ ] Strong, unique `JWT_SECRET` and a **different** `ENCRYPTION_KEY`
 - [ ] `APP_URL` set to your https:// address (reset links + CSRF check use it)
 - [ ] `TZ=Africa/Lusaka` (or left unset — that is the default)
-- [ ] Signed in as the first admin and chose your own password
-- [ ] Only the people who need it are administrators (Admin → Users)
+- [ ] Signed in as the super admin and chose your own password
+- [ ] Added each landlord under Landlords, each with their own sign-in
 - [ ] `npm audit` shows no high/critical issues (`npm run audit`)
 - [ ] HTTPS working (required for the secure login cookie)
 - [ ] `DATABASE_URL` points at your production MySQL

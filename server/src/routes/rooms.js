@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { prisma } from '../db.js';
-import { requireRole, ROLES } from '../auth.js';
 import { resolvePropertyId, loadRoom } from '../access.js';
 import { loadLedgers, bedLabels, roomLabel, mkey } from '../tenancyService.js';
 import { roomTileStatus } from '../status.js';
@@ -10,7 +9,6 @@ import { roomFields } from './properties.js';
 import { badRequest, httpError } from '../httpError.js';
 
 const router = Router();
-const adminOnly = requireRole(ROLES.ADMIN);
 
 /**
  * GET /api/rooms?propertyId=&month=&year=
@@ -92,8 +90,8 @@ router.get('/:roomId/:bed', async (req, res) => {
   res.json({ room, bed, roomLabel: roomLabel(room.number, bed), tenancy });
 });
 
-/** PATCH /api/rooms/:roomId — admin: number, bed count, default rent. */
-router.patch('/:roomId', adminOnly, async (req, res) => {
+/** PATCH /api/rooms/:roomId — number, bed count, default rent. */
+router.patch('/:roomId', async (req, res) => {
   const room = await loadRoom(req, req.params.roomId);
   const body = parse(
     z.object({
@@ -122,7 +120,7 @@ router.patch('/:roomId', adminOnly, async (req, res) => {
   res.json(updated);
 });
 
-router.post('/:roomId/archive', adminOnly, async (req, res) => {
+router.post('/:roomId/archive', async (req, res) => {
   const room = await loadRoom(req, req.params.roomId);
   const current = await prisma.tenancy.count({ where: { roomId: room.id, moveOutDate: null } });
   if (current) throw httpError(409, 'Move out the tenants in this room before removing it.');
@@ -131,7 +129,7 @@ router.post('/:roomId/archive', adminOnly, async (req, res) => {
   res.json(updated);
 });
 
-router.post('/:roomId/unarchive', adminOnly, async (req, res) => {
+router.post('/:roomId/unarchive', async (req, res) => {
   const room = await loadRoom(req, req.params.roomId);
   const updated = await prisma.room.update({ where: { id: room.id }, data: { archivedAt: null } });
   await audit(req, 'room.unarchive', { type: 'room', id: room.id });
@@ -139,7 +137,7 @@ router.post('/:roomId/unarchive', adminOnly, async (req, res) => {
 });
 
 /** Delete a room that never had a tenant; otherwise it must be archived. */
-router.delete('/:roomId', adminOnly, async (req, res) => {
+router.delete('/:roomId', async (req, res) => {
   const room = await loadRoom(req, req.params.roomId);
   if (await prisma.tenancy.count({ where: { roomId: room.id } })) {
     throw httpError(409, 'This room has tenancy history, so it cannot be deleted. Archive it instead.');

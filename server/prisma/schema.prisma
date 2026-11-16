@@ -10,14 +10,30 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// A person who can log in. ADMIN has full control (edit/void payments, manage
-/// users, properties, arrears, audit log); LANDLORD runs day-to-day work on the
-/// properties they are given access to.
+/// A landlord business. Everything a landlord owns (properties, rooms, tenants,
+/// payments, receipts) hangs off its properties, and no landlord can see
+/// another's data. Created and suspended by the super admin.
+model Organization {
+  id        Int      @id @default(autoincrement())
+  name      String
+  isActive  Boolean  @default(true) // false = suspended: its users cannot sign in
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users      User[]
+  properties Property[]
+}
+
+/// A person who can log in. SUPER_ADMIN runs the platform (creates and
+/// suspends landlords, global settings, full audit log) and belongs to no
+/// organization. LANDLORD runs one landlord business: everything inside their
+/// own organization and nothing outside it.
 model User {
   id                 Int       @id @default(autoincrement())
   email              String    @unique
   name               String    @default("")
-  role               String    @default("LANDLORD") // ADMIN | LANDLORD
+  role               String    @default("LANDLORD") // SUPER_ADMIN | LANDLORD
+  organizationId     Int? // null for SUPER_ADMIN
   passwordHash       String
   isActive           Boolean   @default(true)
   // Bumped to revoke every existing session (password change, reset, role
@@ -28,11 +44,13 @@ model User {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
-  propertyAccess PropertyAccess[]
-  auditLogs      AuditLog[]
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  auditLogs    AuditLog[]
+
+  @@index([organizationId])
 }
 
-/// Global settings: email/SMTP config used for all properties.
+/// Platform-wide settings (super admin): email/SMTP config used for all landlords.
 model Setting {
   id            Int      @id @default(1)
   landlordEmail String   @default("") // contact/test address
@@ -50,30 +68,23 @@ model Setting {
 /// A rental property. Its name/address are printed on receipts and its short
 /// code is part of every receipt number issued for it.
 model Property {
-  id         Int       @id @default(autoincrement())
-  name       String
-  address    String    @default("")
-  code       String    @unique // e.g. "KC" → RCT-KC-2026-0001
-  archivedAt DateTime?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id             Int       @id @default(autoincrement())
+  organizationId Int
+  name           String
+  address        String    @default("")
+  // e.g. "KC" → RCT-KC-2026-0001. Unique across the whole platform, because
+  // receipt numbers must never collide between landlords.
+  code           String    @unique
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
+  organization    Organization     @relation(fields: [organizationId], references: [id])
   rooms           Room[]
   tenants         Tenant[]
-  access          PropertyAccess[]
   receiptCounters ReceiptCounter[]
-}
 
-/// Which properties a LANDLORD may see. ADMINs see every property.
-model PropertyAccess {
-  userId     Int
-  propertyId Int
-
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-
-  @@id([userId, propertyId])
-  @@index([propertyId])
+  @@index([organizationId])
 }
 
 /// A physical room. Occupancy is derived from the current tenancy per bed.
@@ -240,10 +251,13 @@ model LoginThrottle {
 }
 
 /// Append-only record of who did what. There is no API to edit or delete it.
+/// organizationId is the landlord business the action belongs to (null for
+/// platform actions), so each landlord can read their own log.
 model AuditLog {
-  id         Int      @id @default(autoincrement())
-  userId     Int?
-  action     String
+  id             Int      @id @default(autoincrement())
+  userId         Int?
+  organizationId Int?
+  action         String
   entityType String   @default("")
   entityId   String   @default("")
   before     Json?
@@ -257,4 +271,5 @@ model AuditLog {
   @@index([createdAt])
   @@index([entityType, entityId])
   @@index([userId])
+  @@index([organizationId, id])
 }

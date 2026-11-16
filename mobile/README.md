@@ -8,18 +8,24 @@ today's numbers, checking bank slips). The super admin uses the web portal.
 How it fits the wider platform is described in
 [docs/PLATFORM_PLAN.md](../docs/PLATFORM_PLAN.md) (§12).
 
-## Status: demo mode until the server's `/api/v1` exists
+## Status: demo mode by default; landlords can already use the real server
 
-Right now the app runs on **realistic sample data held inside the app** (no server, no real
+By default the app runs on **realistic sample data held inside the app** (no server, no real
 money). That lets you try every screen on a real phone and show it to landlords and sponsors
-while the server work in the roadmap (phases 1–5) is built.
+while the server work in the roadmap is built.
+
+**Live mode works for landlords today:** a landlord signs in with their real account and
+sees their real dashboard (collected, outstanding, beds occupied this month). Student and
+sponsor accounts, and bank slips, do not exist on the server yet, so those screens only
+work in demo mode. A landlord with a temporary password must first sign in on the website
+to choose their own.
 
 The app talks to the server through one interface (`src/api/types.ts` → `Api`):
 
 | Mode | File | What it does |
 | --- | --- | --- |
 | `demo` (default) | `src/api/demo.ts` | In-memory sample world; resets when the app restarts |
-| `live` | `src/api/http.ts` | Calls the **planned** `/api/v1` endpoints with bearer tokens, refresh, idempotency keys |
+| `live` | `src/api/http.ts` | Calls the server's `/api/v1` with bearer tokens and refresh (landlord sign-in and dashboard are built; the rest is the planned contract) |
 
 Switching to live is a config change (below), not a rewrite.
 
@@ -54,6 +60,10 @@ Copy `.env.example` to `.env.local` (git-ignored):
 EXPO_PUBLIC_API_MODE=live                      # demo (default) or live
 EXPO_PUBLIC_API_URL=https://rent.yourdomain.com
 ```
+
+To test live mode against the server on your own computer, start the server (`npm run dev`
+in the project root) and set `EXPO_PUBLIC_API_URL` to the computer's Wi-Fi address, e.g.
+`http://192.168.1.20:4000`. Restart `npx expo start` after changing it.
 
 ## Project layout
 

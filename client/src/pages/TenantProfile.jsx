@@ -16,7 +16,7 @@ export default function TenantProfile() {
   const { id } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
-  const { isAdmin } = useAuth();
+  const { isOwner } = useAuth();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -106,10 +106,10 @@ export default function TenantProfile() {
         <button onClick={() => setEditing(true)} className="btn-secondary min-h-[48px] text-[14.5px]">Edit tenant</button>
         {tenancy.isCurrent ? (
           <button onClick={moveOut} className="btn-danger min-h-[48px] text-[14.5px]">Move out</button>
-        ) : isAdmin ? (
+        ) : isOwner ? (
           <button onClick={undoMoveOut} className="btn-secondary min-h-[48px] text-[14.5px]">Undo move-out</button>
         ) : null}
-        {!tenancy.isCurrent && isAdmin && (
+        {!tenancy.isCurrent && isOwner && (
           <button onClick={deleteTenant} className="btn-danger col-span-2 min-h-[48px] text-[14.5px]">Delete tenant</button>
         )}
       </div>
@@ -157,7 +157,7 @@ export default function TenantProfile() {
                 </div>
               </div>
               <StatusBadge status={m.status} />
-              {isAdmin && (
+              {isOwner && (
                 <button onClick={() => setAdjusting(m)} className="min-h-[36px] rounded-lg border border-line bg-white px-2.5 text-[12.5px] font-semibold text-ink">Adjust</button>
               )}
             </div>
@@ -177,7 +177,7 @@ export default function TenantProfile() {
               </div>
               {a.reversedAt ? (
                 <span className="text-[12px] text-muted">Reversed</span>
-              ) : isAdmin ? (
+              ) : isOwner ? (
                 <button onClick={() => setReversing(a)} className="min-h-[36px] rounded-lg border border-line bg-white px-2.5 text-[12.5px] font-semibold">Reverse</button>
               ) : null}
             </div>
@@ -210,7 +210,7 @@ export default function TenantProfile() {
                     <button onClick={() => navigate(`/receipt/${p.receipt.id}`)} className="min-h-[36px] rounded-lg border border-line bg-white px-2.5 font-semibold text-ink">View</button>
                     <a href={`/api/receipts/${p.receipt.id}/pdf`} target="_blank" rel="noreferrer" className="flex min-h-[36px] items-center rounded-lg border border-line bg-white px-2.5 font-semibold text-ink">Reprint</a>
                     {!isVoid && <button onClick={() => resend(p.receipt.id)} className="min-h-[36px] rounded-lg border border-line bg-white px-2.5 font-semibold text-ink">Re-send</button>}
-                    {!isVoid && isAdmin && (
+                    {!isVoid && isOwner && (
                       <>
                         <button onClick={() => navigate(`/pay?tenancyId=${tenancy.id}&correct=${p.id}`)} className="min-h-[36px] rounded-lg border border-line bg-white px-2.5 font-semibold text-ink">Correct</button>
                         <button onClick={() => setVoiding(p)} className="min-h-[36px] rounded-lg border border-[#F2D7D0] bg-due-bg px-2.5 font-semibold text-due-text">Void</button>
@@ -225,7 +225,7 @@ export default function TenantProfile() {
       </div>
 
       {editing && (
-        <EditTenantModal tenant={tenant} tenancy={tenancy} isAdmin={isAdmin} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} />
+        <EditTenantModal tenant={tenant} tenancy={tenancy} isOwner={isOwner} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} />
       )}
       {voiding && <VoidDialog payment={voiding} tenant={tenant} onClose={() => setVoiding(null)} onDone={load} />}
       {adjusting && <AdjustDialog tenancyId={tenancy.id} month={adjusting} onClose={() => setAdjusting(null)} onDone={load} />}
@@ -312,7 +312,7 @@ function AdjustDialog({ tenancyId, month, onClose, onDone }) {
   );
 }
 
-function EditTenantModal({ tenant, tenancy, isAdmin, onClose, onSaved }) {
+function EditTenantModal({ tenant, tenancy, isOwner, onClose, onSaved }) {
   const toast = useToast();
   const [name, setName] = useState(tenant.name);
   const [phone, setPhone] = useState(tenant.phone || '');
@@ -329,8 +329,8 @@ function EditTenantModal({ tenant, tenancy, isAdmin, onClose, onSaved }) {
     try {
       await api.patch(`/tenants/${tenant.id}`, { name, phone, email });
       const tenancyPatch = { monthlyRent: ngwee };
-      if (isAdmin && moveIn && moveIn !== isoDate(tenancy.moveInDate)) tenancyPatch.moveInDate = moveIn;
-      if (isAdmin && tenancy.moveOutDate && moveOut && moveOut !== isoDate(tenancy.moveOutDate)) tenancyPatch.moveOutDate = moveOut;
+      if (isOwner && moveIn && moveIn !== isoDate(tenancy.moveInDate)) tenancyPatch.moveInDate = moveIn;
+      if (isOwner && tenancy.moveOutDate && moveOut && moveOut !== isoDate(tenancy.moveOutDate)) tenancyPatch.moveOutDate = moveOut;
       await api.patch(`/tenancies/${tenancy.id}`, tenancyPatch);
       toast.success('Tenant updated');
       onSaved();
@@ -344,7 +344,7 @@ function EditTenantModal({ tenant, tenancy, isAdmin, onClose, onSaved }) {
         <div><label className="field-label">Phone</label><input className="field-input" value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
         <div><label className="field-label">Email</label><input className="field-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
         <div><label className="field-label">Rent (K)</label><input className="field-input" inputMode="decimal" value={rent} onChange={(e) => setRent(e.target.value)} /></div>
-        {isAdmin && (
+        {isOwner && (
           <div className="grid grid-cols-2 gap-3">
             <div><label className="field-label">Move-in</label><input className="field-input" type="date" value={moveIn} onChange={(e) => setMoveIn(e.target.value)} /></div>
             {tenancy.moveOutDate && (

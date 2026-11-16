@@ -9,14 +9,15 @@ Open the app and enter your email and password. You'll stay signed in on that
 device while you use it; after **12 hours without using the app** (and always after
 **7 days**) you'll be asked to sign in again.
 
-**First sign-in:** if an administrator created your account (or reset your
-password), you'll be asked to choose your own password before you can continue.
-Passwords must be at least **8 characters** (**12** for administrators) and can't
+**First sign-in:** your account is created by the super admin (the person who
+runs RentReceipt). When they create it or reset your password, you'll be asked
+to choose your own password before you can continue.
+Passwords must be at least **8 characters** (**12** for the super admin) and can't
 be a very common one like `password123`. A short phrase of a few words works well.
 
 **Too many wrong passwords:** after **5 wrong passwords** in a row, sign-in for that
 email is paused for **15 minutes** (longer if it keeps happening, up to 24 hours).
-Wait, use **Forgot password?**, or ask an administrator to unlock you. You'll get
+Wait, use **Forgot password?**, or ask the super admin to unlock you. You'll get
 an email when this happens, in case it wasn't you. You can install it like an app: in your phone's browser
 menu choose **"Add to Home screen"**.
 
@@ -29,8 +30,8 @@ and expires after **30 minutes**. Changing your password signs you out on every
 other phone or computer.
 
 **If you haven't set up email** on your server, the reset link can't be sent. In
-that case an **administrator** can set a temporary password for you (Admin → Users
-→ Reset password), or whoever runs the server can reset it from the command line:
+that case the **super admin** can set a temporary password for you (Landlords →
+Reset password), or whoever runs the server can reset it from the command line:
 
 ```bash
 npm run set-password -- you@example.com "your-new-password"
@@ -42,16 +43,21 @@ you out everywhere (useful if you lose your phone).
 
 ### Who can do what
 
-| | Landlord | Administrator |
+RentReceipt is shared by many landlords. **Each landlord sees only their own
+properties, tenants and money** — never another landlord's.
+
+| | Landlord (your own business) | Super admin (the platform) |
 | --- | :---: | :---: |
-| See rooms, tenants, receipts, reports, arrears (for their properties) | ✅ | ✅ (all properties) |
-| Assign tenants, record payments, move tenants out, edit contact details | ✅ | ✅ |
-| **Void** or **correct** a recorded payment | — | ✅ |
-| Waive rent or add a charge to a month | — | ✅ |
-| Change tenancy dates, undo a move-out, delete a tenant | — | ✅ |
-| Add / edit / archive properties and rooms | — | ✅ |
-| Add users, reset their passwords, unlock or deactivate them | — | ✅ |
-| Email settings, audit log | — | ✅ |
+| See rooms, tenants, receipts, reports, arrears | ✅ | — |
+| Assign tenants, record payments, move tenants out, edit contact details | ✅ | — |
+| **Void** or **correct** a recorded payment | ✅ | — |
+| Waive rent or add a charge to a month | ✅ | — |
+| Change tenancy dates, undo a move-out, delete a tenant | ✅ | — |
+| Add / edit / archive properties and rooms | ✅ | — |
+| Audit log | ✅ (your own) | ✅ (all landlords) |
+| Add, rename, suspend or reactivate landlords | — | ✅ |
+| Reset a landlord's password, unlock them, sign them out everywhere | — | ✅ |
+| Email settings | — | ✅ |
 
 If you have more than one property, choose which one you're looking at from the
 name under **RentReceipt** at the top of the screen.
@@ -173,7 +179,7 @@ email, notes, or monthly rent.
 
 ---
 
-## Fixing mistakes (administrators)
+## Fixing mistakes
 
 Receipts are financial records, so a payment is **never deleted**. Instead:
 
@@ -192,22 +198,31 @@ Both need a **reason**, which is kept in the audit log.
 **Reports → Arrears report** (or tap **Outstanding** on the dashboard) lists every
 tenant who owes rent, how much, and since which month. Export it as CSV.
 
-Administrators can **waive** rent for a month (e.g. a repair period) or **add a
+You can **waive** rent for a month (e.g. a repair period) or **add a
 charge** (e.g. damage): open the tenant, tap **Adjust** on the month, and give a
 reason. An adjustment can be reversed later; it is never deleted.
 
-## Admin
+## Manage
 
-The **Admin** tab (administrators only) has:
-- **Users** — add landlords or administrators with a temporary password, choose
-  which properties a landlord can see, reset passwords, unlock accounts, sign
-  someone out everywhere, deactivate or delete accounts. There must always be at
-  least one active administrator, and you can't remove or demote yourself.
+The **Manage** tab has:
 - **Properties & rooms** — add properties (each has a short code used in its
   receipt numbers, e.g. `RCT-KC-2026-0001`), edit names/addresses, add or
   remove rooms and beds. Properties and rooms with history are **archived**, not
   deleted.
-- **Audit log** — every change and sign-in, who did it and when.
+- **Arrears** — who owes what.
+- **Audit log** — every change and sign-in in your business, who did it and when.
+
+## Super admin
+
+The super admin signs in to the same website and sees different screens:
+- **Landlords** — add a landlord (business name, sign-in email and a temporary
+  password), rename, **suspend** (they are signed out at once and can't sign in;
+  their records are kept) or reactivate. For each landlord's account: reset the
+  password, unlock it, or sign it out everywhere.
+- **Audit log** — every change and sign-in across all landlords.
+- **Settings** — the email (SMTP) settings used to send receipts for everyone.
+
+The super admin does not see or change a landlord's tenants and payments.
 
 ## Reports
 

@@ -85,7 +85,7 @@ router.post('/:id/resend', async (req, res) => {
     throw badRequest('This tenant has no email address on file.');
   }
   if (!(await isSmtpConfigured())) {
-    throw badRequest('Email is not set up yet. Ask an administrator to add the email settings.');
+    throw badRequest('Email is not set up on this platform yet.');
   }
   await queueAndSend(receipt.id);
   await audit(req, 'receipt.resend', { type: 'receipt', id: receipt.id });

@@ -1,16 +1,14 @@
-// Properties: everyone sees the properties they have access to; only ADMINs
-// create, edit, archive or delete them.
+// Properties of the signed-in landlord's own business: list, create, edit,
+// archive, delete. Another landlord's property behaves as if it did not exist.
 
 import { Router } from 'express';
 import { prisma } from '../db.js';
-import { requireRole, ROLES, isAdmin } from '../auth.js';
 import { propertyFilter, assertPropertyAccess } from '../access.js';
 import { audit } from '../audit.js';
 import { parse, z, text, ngwee } from '../validate.js';
 import { notFound, httpError } from '../httpError.js';
 
 const router = Router();
-const adminOnly = requireRole(ROLES.ADMIN);
 
 const code = () =>
   z
@@ -20,6 +18,9 @@ const code = () =>
     // Must start with a letter so it can never look like a year in old
     // RCT-YYYY-NNNN receipt numbers.
     .regex(/^[A-Z][A-Z0-9]{1,5}$/, 'Property code must be 2–6 letters or digits, starting with a letter (it appears in receipt numbers).');
+
+// Codes are unique across all landlords (they appear in receipt numbers).
+const CODE_TAKEN = 'That code is already in use. Please choose another.';
 
 const roomFields = {
   bedCount: z.coerce.number().int().min(1, 'A room needs at least 1 bed.').max(26, 'A room can have at most 26 beds.'),
@@ -51,9 +52,9 @@ async function activeTenancyCount(propertyId) {
 
 router.get('/', async (req, res) => {
   const filter = await propertyFilter(req);
-  const includeArchived = isAdmin(req.user) && req.query.includeArchived === '1';
+  const includeArchived = req.query.includeArchived === '1';
   const props = await prisma.property.findMany({
-    where: { ...(filter.in ? { id: filter } : {}), ...(includeArchived ? {} : { archivedAt: null }) },
+    where: { id: filter, ...(includeArchived ? {} : { archivedAt: null }) },
     include: { rooms: { where: { archivedAt: null }, select: { bedCount: true } } },
     orderBy: { id: 'asc' },
   });
@@ -72,7 +73,7 @@ router.get('/:id', async (req, res) => {
   res.json({ ...p, rooms, receiptsIssued: await hasIssuedReceipts(p) });
 });
 
-router.post('/', adminOnly, async (req, res) => {
+router.post('/', async (req, res) => {
   const body = parse(
     z.object({
       name: text().min(1, 'Please enter the property name.'),
@@ -86,10 +87,11 @@ router.post('/', adminOnly, async (req, res) => {
     req.body
   );
   if (await prisma.property.findUnique({ where: { code: body.code } })) {
-    throw httpError(409, 'Another property already uses that code.');
+    throw httpError(409, CODE_TAKEN);
   }
   const property = await prisma.property.create({
     data: {
+      organizationId: req.user.organizationId,
       name: body.name,
       address: body.address,
       code: body.code,
@@ -108,7 +110,7 @@ router.post('/', adminOnly, async (req, res) => {
   res.status(201).json(property);
 });
 
-router.patch('/:id', adminOnly, async (req, res) => {
+router.patch('/:id', async (req, res) => {
   const p = await loadProperty(req, req.params.id);
   const body = parse(
     z.object({ name: text().min(1, 'Please enter the property name.').optional(), address: text().optional(), code: code().optional() }),
@@ -119,7 +121,7 @@ router.patch('/:id', adminOnly, async (req, res) => {
       throw httpError(409, 'The code cannot change after receipts have been issued with it.');
     }
     if (await prisma.property.findUnique({ where: { code: body.code } })) {
-      throw httpError(409, 'Another property already uses that code.');
+      throw httpError(409, CODE_TAKEN);
     }
   }
   const updated = await prisma.property.update({ where: { id: p.id }, data: body });
@@ -127,7 +129,7 @@ router.patch('/:id', adminOnly, async (req, res) => {
   res.json(updated);
 });
 
-router.post('/:id/archive', adminOnly, async (req, res) => {
+router.post('/:id/archive', async (req, res) => {
   const p = await loadProperty(req, req.params.id);
   if (await activeTenancyCount(p.id)) {
     throw httpError(409, 'Move out all current tenants before archiving this property.');
@@ -137,7 +139,7 @@ router.post('/:id/archive', adminOnly, async (req, res) => {
   res.json(updated);
 });
 
-router.post('/:id/unarchive', adminOnly, async (req, res) => {
+router.post('/:id/unarchive', async (req, res) => {
   const p = await loadProperty(req, req.params.id);
   const updated = await prisma.property.update({ where: { id: p.id }, data: { archivedAt: null } });
   await audit(req, 'property.unarchive', { type: 'property', id: p.id });
@@ -145,7 +147,7 @@ router.post('/:id/unarchive', adminOnly, async (req, res) => {
 });
 
 /** Delete a property that has never had tenants. Otherwise archive it. */
-router.delete('/:id', adminOnly, async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const p = await loadProperty(req, req.params.id);
   const [tenancies, tenants] = await Promise.all([
     prisma.tenancy.count({ where: { room: { propertyId: p.id } } }),
@@ -163,9 +165,9 @@ router.delete('/:id', adminOnly, async (req, res) => {
   res.json({ ok: true });
 });
 
-// --- Rooms within a property (admin) -----------------------------------------
+// --- Rooms within a property -------------------------------------------------
 
-router.post('/:id/rooms', adminOnly, async (req, res) => {
+router.post('/:id/rooms', async (req, res) => {
   const p = await loadProperty(req, req.params.id);
   const body = parse(
     z.object({

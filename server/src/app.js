@@ -26,6 +26,8 @@ import paymentsRoutes from './routes/payments.js';
 import receiptsRoutes from './routes/receipts.js';
 import reportsRoutes from './routes/reports.js';
 import settingsRoutes from './routes/settings.js';
+import auditRoutes from './routes/audit.js';
+import v1Routes from './routes/v1.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -98,18 +100,25 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // Public auth routes (some individual routes require a session).
 app.use('/api/auth', wrapAsync(authRoutes));
 
+// The phone app's API.
+app.use('/api/v1', wrapAsync(v1Routes));
+
 // Everything else requires a signed-in user who has set their own password.
+// The super admin runs the platform; a landlord works inside their own
+// business (routes/access.js keeps each landlord to their own data).
 const signedIn = [requireAuth, requirePasswordCurrent];
-const adminOnly = requireRole(ROLES.ADMIN);
-app.use('/api/admin', ...signedIn, adminOnly, wrapAsync(adminRoutes));
-app.use('/api/settings', ...signedIn, adminOnly, wrapAsync(settingsRoutes));
-app.use('/api/properties', ...signedIn, wrapAsync(propertiesRoutes));
-app.use('/api/rooms', ...signedIn, wrapAsync(roomsRoutes));
-app.use('/api/tenants', ...signedIn, wrapAsync(tenantsRoutes));
-app.use('/api/tenancies', ...signedIn, wrapAsync(tenanciesRoutes));
-app.use('/api/payments', ...signedIn, wrapAsync(paymentsRoutes));
-app.use('/api/receipts', ...signedIn, wrapAsync(receiptsRoutes));
-app.use('/api/reports', ...signedIn, wrapAsync(reportsRoutes));
+const superAdmin = [...signedIn, requireRole(ROLES.SUPER_ADMIN)];
+const landlord = [...signedIn, requireRole(ROLES.LANDLORD)];
+app.use('/api/admin', ...superAdmin, wrapAsync(adminRoutes));
+app.use('/api/settings', ...superAdmin, wrapAsync(settingsRoutes));
+app.use('/api/properties', ...landlord, wrapAsync(propertiesRoutes));
+app.use('/api/rooms', ...landlord, wrapAsync(roomsRoutes));
+app.use('/api/tenants', ...landlord, wrapAsync(tenantsRoutes));
+app.use('/api/tenancies', ...landlord, wrapAsync(tenanciesRoutes));
+app.use('/api/payments', ...landlord, wrapAsync(paymentsRoutes));
+app.use('/api/receipts', ...landlord, wrapAsync(receiptsRoutes));
+app.use('/api/reports', ...landlord, wrapAsync(reportsRoutes));
+app.use('/api/audit', ...landlord, wrapAsync(auditRoutes));
 
 // Unknown API routes get a JSON 404 (never the SPA's HTML).
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));

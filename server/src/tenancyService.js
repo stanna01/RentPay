@@ -197,3 +197,30 @@ export async function buildTenancyProfile(tenancyId) {
     unpaidMonths: unpaidMonthsFor(ledger),
   };
 }
+
+/**
+ * This month's totals across several properties (the phone app's dashboard):
+ * beds, occupied beds, rent collected and rent still outstanding for the
+ * current tenants. Archived properties and rooms are left out.
+ */
+export async function monthSummary(propertyIds, year, month) {
+  const room = { archivedAt: null, property: { id: { in: propertyIds }, archivedAt: null } };
+  const [rooms, tenancies] = await Promise.all([
+    prisma.room.findMany({ where: room, select: { bedCount: true } }),
+    prisma.tenancy.findMany({ where: { moveOutDate: null, room } }),
+  ]);
+  const ledgers = await loadLedgers(tenancies);
+  let collected = 0;
+  let outstanding = 0;
+  for (const t of tenancies) {
+    const st = ledgers.get(t.id).status(year, month);
+    collected += st.applied;
+    outstanding += st.balance;
+  }
+  return {
+    totalBeds: rooms.reduce((s, r) => s + r.bedCount, 0),
+    occupiedBeds: tenancies.length,
+    collected,
+    outstanding,
+  };
+}

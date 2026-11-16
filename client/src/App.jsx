@@ -14,7 +14,7 @@ import Reports from './pages/Reports.jsx';
 import ArrearsReport from './pages/ArrearsReport.jsx';
 import Settings from './pages/Settings.jsx';
 import PastTenants from './pages/PastTenants.jsx';
-import AdminUsers from './pages/AdminUsers.jsx';
+import AdminLandlords from './pages/AdminLandlords.jsx';
 import AdminProperties from './pages/AdminProperties.jsx';
 import AdminPropertyDetail from './pages/AdminPropertyDetail.jsx';
 import AuditLog from './pages/AuditLog.jsx';
@@ -27,16 +27,11 @@ function Protected({ children }) {
   return children;
 }
 
-/** Only admins get through; the server enforces the same rule on every request. */
-function AdminOnly({ children }) {
-  const { isAdmin } = useAuth();
-  return isAdmin ? children : <Navigate to="/" replace />;
-}
 
 function Header() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
-  const { properties, property, selectProperty, isAdmin } = useAuth();
+  const { properties, property, selectProperty, isSuperAdmin } = useAuth();
   const onDash = pathname === '/';
   return (
     <header
@@ -57,7 +52,9 @@ function Header() {
       </div>
       <div className="min-w-0 flex-1">
         <div className="text-[17px] font-bold leading-tight tracking-tight">RentReceipt</div>
-        {properties.length > 1 ? (
+        {isSuperAdmin ? (
+          <div className="truncate text-[11.5px] text-muted">Platform admin</div>
+        ) : properties.length > 1 ? (
           <select
             aria-label="Property"
             value={property?.id || ''}
@@ -70,7 +67,7 @@ function Header() {
           </select>
         ) : (
           <div className="truncate text-[11.5px] text-muted">
-            {property?.name || (isAdmin ? 'No property yet — add one in Admin' : 'No property assigned')}
+            {property?.name || 'No property yet — add one in Manage'}
           </div>
         )}
       </div>
@@ -80,14 +77,20 @@ function Header() {
 
 function BottomNav() {
   const { pathname } = useLocation();
-  const { isAdmin } = useAuth();
-  const items = [
-    { to: '/', label: 'Rooms', icon: '🏠' },
-    { to: '/pay', label: 'Payment', icon: '💵' },
-    { to: '/reports', label: 'Reports', icon: '📊' },
-    ...(isAdmin ? [{ to: '/admin', label: 'Admin', icon: '🛡️' }] : []),
-    { to: '/settings', label: 'Settings', icon: '⚙️' },
-  ];
+  const { isSuperAdmin } = useAuth();
+  const items = isSuperAdmin
+    ? [
+        { to: '/', label: 'Landlords', icon: '🏢' },
+        { to: '/admin/audit', label: 'Audit log', icon: '📜' },
+        { to: '/settings', label: 'Settings', icon: '⚙️' },
+      ]
+    : [
+        { to: '/', label: 'Rooms', icon: '🏠' },
+        { to: '/pay', label: 'Payment', icon: '💵' },
+        { to: '/reports', label: 'Reports', icon: '📊' },
+        { to: '/admin', label: 'Manage', icon: '🛠️' },
+        { to: '/settings', label: 'Settings', icon: '⚙️' },
+      ];
   return (
     <nav
       className="fixed inset-x-0 bottom-0 z-40 border-t border-line bg-white"
@@ -125,16 +128,15 @@ function Shell({ children }) {
   );
 }
 
-function AdminHome() {
+function ManageHome() {
   const items = [
-    { to: '/admin/users', icon: '👥', title: 'Users', text: 'Add landlords and admins, reset passwords, unlock accounts' },
     { to: '/admin/properties', icon: '🏢', title: 'Properties & rooms', text: 'Add, edit, archive properties and their rooms' },
     { to: '/arrears', icon: '⚠️', title: 'Arrears', text: 'Who owes what; waive or add charges' },
     { to: '/admin/audit', icon: '📜', title: 'Audit log', text: 'Every change, who made it and when' },
   ];
   return (
     <div className="flex flex-col gap-2.5 px-3.5 pb-6 pt-4">
-      <div className="text-[22px] font-bold tracking-tight">Admin</div>
+      <div className="text-[22px] font-bold tracking-tight">Manage</div>
       {items.map((it) => (
         <Link key={it.to} to={it.to} className="card flex items-center gap-3 px-4 py-3.5">
           <span className="text-2xl">{it.icon}</span>
@@ -149,8 +151,42 @@ function AdminHome() {
   );
 }
 
+/** The super admin's screens: landlords, the platform audit log, settings. */
+function SuperAdminRoutes() {
+  return (
+    <Routes>
+      <Route path="/" element={<AdminLandlords />} />
+      <Route path="/admin/audit" element={<AuditLog />} />
+      <Route path="/settings" element={<Settings />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+
+/** A landlord's screens. The server keeps every request inside their own business. */
+function LandlordRoutes() {
+  return (
+    <Routes>
+      <Route path="/" element={<Dashboard />} />
+      <Route path="/tenancy/:id" element={<TenantProfile />} />
+      <Route path="/assign/:roomId/:bed" element={<AssignTenant />} />
+      <Route path="/pay" element={<RecordPayment />} />
+      <Route path="/receipt/:id" element={<ReceiptPreview />} />
+      <Route path="/reports" element={<Reports />} />
+      <Route path="/arrears" element={<ArrearsReport />} />
+      <Route path="/past" element={<PastTenants />} />
+      <Route path="/settings" element={<Settings />} />
+      <Route path="/admin" element={<ManageHome />} />
+      <Route path="/admin/properties" element={<AdminProperties />} />
+      <Route path="/admin/properties/:id" element={<AdminPropertyDetail />} />
+      <Route path="/admin/audit" element={<AuditLog />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+
 export default function App() {
-  const { user } = useAuth();
+  const { user, isSuperAdmin } = useAuth();
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
@@ -159,25 +195,7 @@ export default function App() {
         path="/*"
         element={
           <Protected>
-            <Shell>
-              <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/tenancy/:id" element={<TenantProfile />} />
-                <Route path="/assign/:roomId/:bed" element={<AssignTenant />} />
-                <Route path="/pay" element={<RecordPayment />} />
-                <Route path="/receipt/:id" element={<ReceiptPreview />} />
-                <Route path="/reports" element={<Reports />} />
-                <Route path="/arrears" element={<ArrearsReport />} />
-                <Route path="/past" element={<PastTenants />} />
-                <Route path="/settings" element={<Settings />} />
-                <Route path="/admin" element={<AdminOnly><AdminHome /></AdminOnly>} />
-                <Route path="/admin/users" element={<AdminOnly><AdminUsers /></AdminOnly>} />
-                <Route path="/admin/properties" element={<AdminOnly><AdminProperties /></AdminOnly>} />
-                <Route path="/admin/properties/:id" element={<AdminOnly><AdminPropertyDetail /></AdminOnly>} />
-                <Route path="/admin/audit" element={<AdminOnly><AuditLog /></AdminOnly>} />
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-            </Shell>
+            <Shell>{isSuperAdmin ? <SuperAdminRoutes /> : <LandlordRoutes />}</Shell>
           </Protected>
         }
       />

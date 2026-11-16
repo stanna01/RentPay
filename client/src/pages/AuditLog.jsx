@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, qs } from '../api.js';
 import { Loading, EmptyState, useToast, fmtDateTime } from '../ui.jsx';
+import { useAuth } from '../auth.jsx';
 
 const FILTERS = [
   ['', 'Everything'],
@@ -10,6 +11,7 @@ const FILTERS = [
   ['tenancy', 'Tenancies'],
   ['property', 'Properties'],
   ['room', 'Rooms'],
+  ['landlord', 'Landlords'],
   ['user', 'Users'],
   ['login', 'Sign-ins'],
   ['password', 'Passwords'],
@@ -18,6 +20,9 @@ const FILTERS = [
 
 export default function AuditLog() {
   const toast = useToast();
+  // The super admin reads every landlord's entries; a landlord reads their own.
+  const { isSuperAdmin } = useAuth();
+  const endpoint = isSuperAdmin ? '/admin/audit' : '/audit';
   const [action, setAction] = useState('');
   const [page, setPage] = useState(1);
   const [data, setData] = useState(null);
@@ -25,7 +30,7 @@ export default function AuditLog() {
 
   useEffect(() => {
     setData(null);
-    api.get(`/admin/audit${qs({ action, page })}`).then(setData).catch((e) => toast.error(e.message));
+    api.get(`${endpoint}${qs({ action, page })}`).then(setData).catch((e) => toast.error(e.message));
   }, [action, page]);
 
   const pages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;

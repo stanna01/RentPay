@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { prisma } from '../db.js';
-import { requireRole, ROLES } from '../auth.js';
 import { propertyFilter, resolvePropertyId, loadTenant, assertPropertyAccess } from '../access.js';
 import { audit } from '../audit.js';
 import { parse, z, text, optionalEmail, email } from '../validate.js';
@@ -27,7 +26,7 @@ router.get('/', async (req, res) => {
   const tenants = await prisma.tenant.findMany({
     where: {
       deletedAt: null,
-      propertyId: propertyId ?? (filter.in ? filter : undefined),
+      propertyId: propertyId ?? filter,
       ...(search
         ? { OR: [{ name: { contains: search } }, { phone: { contains: search } }, { email: { contains: search } }] }
         : {}),
@@ -85,11 +84,11 @@ router.patch('/:id', async (req, res) => {
 });
 
 /**
- * DELETE /api/tenants/:id — admin: remove a tenant from all lists. Their
+ * DELETE /api/tenants/:id — remove a tenant from all lists. Their
  * tenancies, payments and receipts are KEPT (financial records); the tenant
  * row is soft-deleted.
  */
-router.delete('/:id', requireRole(ROLES.ADMIN), async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const tenant = await loadTenant(req, req.params.id);
   const current = await prisma.tenancy.count({ where: { tenantId: tenant.id, moveOutDate: null } });
   if (current) throw httpError(409, 'Move this tenant out before deleting them.');

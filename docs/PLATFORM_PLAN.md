@@ -26,6 +26,19 @@ still needed from you (§18).
 | Payment provider | **Not chosen yet.** Research and recommendation in §8.1. |
 | Sign-in | **Email + password** for everyone. |
 | Mobile app | **React Native + Expo** in [`mobile/`](../mobile/), one codebase for Android and iPhone. |
+| Audience (decided 16 Nov 2026) | **Student boarding houses only.** |
+| Build order (16 Nov 2026) | **Many landlords + super admin first** (built: see "Status" below), then billing, student accounts, online payments, sponsors. One piece at a time. |
+| Roles for now (16 Nov 2026) | **Two fixed roles:** super admin and landlord (one sign-in per landlord business). Staff accounts and editable permissions (§4) come later. |
+| Technology (16 Nov 2026) | **Keep it simple:** stay on the current JavaScript server and MySQL. TypeScript, Redis, a worker process and object storage (§3, §16) are added only when a feature truly needs them. |
+
+### Status (16 Nov 2026)
+
+Built: landlord businesses (`Organization`) with isolation between them, the super admin's
+Landlords screen (add, rename, suspend, reset password), a landlord's own audit log, and the
+phone app's first real endpoints (`/api/v1`: landlord sign-in with tokens and dashboard).
+Kept simpler than this plan describes, on purpose: no `Session` table (phone tokens are not
+stored on the server), no permission catalog, no TypeScript, and the super admin cannot open
+a landlord's tenants or payments.
 
 ---
 

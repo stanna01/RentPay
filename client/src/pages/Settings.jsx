@@ -7,7 +7,7 @@ import { useAuth } from '../auth.jsx';
 export default function Settings() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { user, isAdmin, logout, logoutEverywhere } = useAuth();
+  const { user, isSuperAdmin, logout, logoutEverywhere } = useAuth();
 
   const signOutEverywhere = async () => {
     if (!confirm('Sign out on every phone and computer, including this one?')) return;
@@ -23,12 +23,12 @@ export default function Settings() {
       <div className="card px-4 py-3.5">
         <div className="text-xs text-muted">Signed in as</div>
         <div className="font-semibold">{user.name ? `${user.name} · ` : ''}{user.email}</div>
-        <div className="text-xs font-bold uppercase tracking-wide text-brand">{user.role === 'ADMIN' ? 'Administrator' : 'Landlord'}</div>
+        <div className="text-xs font-bold uppercase tracking-wide text-brand">{isSuperAdmin ? 'Super admin' : `Landlord · ${user.organization?.name || ''}`}</div>
       </div>
 
-      {isAdmin && <EmailSettings />}
+      {isSuperAdmin && <EmailSettings />}
 
-      <div className="card p-4">
+      {!isSuperAdmin && <div className="card p-4">
         <h2 className="mb-3 text-sm font-bold text-muted">Tenants</h2>
         <button onClick={() => navigate('/past')} className="flex w-full items-center gap-3 rounded-xl border border-line bg-white px-4 py-3 text-left">
           <span className="text-xl">📁</span>
@@ -38,9 +38,9 @@ export default function Settings() {
           </div>
           <span className="text-vacant-border">›</span>
         </button>
-      </div>
+      </div>}
 
-      <ChangePassword minLength={isAdmin ? 12 : 8} />
+      <ChangePassword minLength={isSuperAdmin ? 12 : 8} />
 
       <button onClick={signOutEverywhere} className="btn-secondary w-full">Sign out of all devices</button>
       <button onClick={logout} className="btn-danger w-full">Log out</button>

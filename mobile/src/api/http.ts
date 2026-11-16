@@ -1,7 +1,9 @@
 // Live mode: talks to the RentReceipt server's /api/v1 (docs/PLATFORM_PLAN.md §11).
 //
-// NOTE: these endpoints are the PLANNED contract. The server builds them in
-// phases 1–5 of the roadmap; until then run the app in demo mode (the default).
+// BUILT SO FAR on the server (server/src/routes/v1.js): sign-in, token refresh,
+// sign-out, /me and the landlord's dashboard and (always empty) bank-slip list.
+// The student, sponsor and payment endpoints below are still the PLANNED
+// contract, so only landlords can use live mode for now.
 //
 // Auth: a short-lived access token is sent as a Bearer header. When it expires
 // the client swaps the refresh token for new ones once (shared by concurrent

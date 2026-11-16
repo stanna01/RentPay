@@ -1,8 +1,8 @@
 // Password rules, following NIST SP 800-63B: a minimum length (longer for
-// admins), a maximum that fits bcrypt, and a block-list of very common
+// super admins), a maximum that fits bcrypt, and a block-list of very common
 // passwords. No forced complexity rules — length matters most.
 
-export const MIN_LENGTH = { ADMIN: 12, LANDLORD: 8 };
+export const MIN_LENGTH = { SUPER_ADMIN: 12, LANDLORD: 8 };
 // bcrypt only uses the first 72 bytes; refuse longer so nothing is silently cut.
 export const MAX_BYTES = 72;
 

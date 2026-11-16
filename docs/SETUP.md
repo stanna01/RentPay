@@ -39,7 +39,7 @@ Open `server/.env` and set at least:
 | ------------------- | ----------------------------------------------------------------- |
 | `DATABASE_URL`      | Your MySQL connection string: `mysql://user:pass@host:3306/db`.  |
 | `JWT_SECRET`        | Any long random string. Generate one: `openssl rand -base64 48`. |
-| `ADMIN_EMAIL`       | The first administrator account the seed creates.                 |
+| `ADMIN_EMAIL`       | The super admin account the seed creates.                         |
 | `ADMIN_PASSWORD`    | A temporary password (12+ chars); you must change it at first sign-in. |
 | `ENCRYPTION_KEY`    | A separate secret that encrypts the stored SMTP password.         |
 
@@ -50,7 +50,7 @@ Email (`SMTP_*`) can be left blank for now — see
 
 ```bash
 npm run db:migrate     # creates the MySQL tables
-npm run db:seed        # creates the first admin + a property with 24 rooms (clean start)
+npm run db:seed        # creates the super admin (clean start); add landlords in the app
 ```
 
 `db:seed` creates:
@@ -117,7 +117,7 @@ docs/      These guides
 
 If a user is locked out, use the built-in **Forgot password?** link on the
 login screen (needs email configured — see [EMAIL_SETUP.md](./EMAIL_SETUP.md)),
-or have an administrator set a temporary password (Admin → Users).
+or have the super admin set a temporary password (Landlords → Reset password).
 
 The guaranteed, email-free recovery is the command-line reset:
 
@@ -131,7 +131,7 @@ production it never is (anyone with log access could take over the account).
 
 ## Common issues
 
-- **"Please log in" loops** — make sure you ran `db:seed` so the landlord account
+- **"Please log in" loops** — make sure you ran `db:seed` so the super admin account
   exists, and that you're using the email/password from `server/.env`.
 - **Port already in use** — change `PORT` in `server/.env` (backend) or the
   `server.port` in `client/vite.config.js` (frontend).

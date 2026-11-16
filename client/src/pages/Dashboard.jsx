@@ -53,7 +53,7 @@ function BedButton({ bed, onClick }) {
 export default function Dashboard() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { propertyId, isAdmin } = useAuth();
+  const { propertyId, isOwner } = useAuth();
   const now = new Date();
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [year, setYear] = useState(now.getFullYear());
@@ -79,8 +79,8 @@ export default function Dashboard() {
       <EmptyState
         icon="🏢"
         title="No property yet"
-        message={isAdmin ? 'Add your first property to get started.' : 'Ask your administrator to give you access to a property.'}
-        action={isAdmin && <button className="btn-primary" onClick={() => navigate('/admin/properties')}>Add a property</button>}
+        message={isOwner ? 'Add your first property to get started.' : 'No property has been set up yet.'}
+        action={isOwner && <button className="btn-primary" onClick={() => navigate('/admin/properties')}>Add a property</button>}
       />
     );
   }
@@ -117,7 +117,7 @@ export default function Dashboard() {
       </div>
 
       {data.rooms.length === 0 && (
-        <EmptyState icon="🚪" title="No rooms yet" message={isAdmin ? 'Add rooms to this property in Admin → Properties.' : 'This property has no rooms yet.'} />
+        <EmptyState icon="🚪" title="No rooms yet" message={isOwner ? 'Add rooms to this property in Manage → Properties.' : 'This property has no rooms yet.'} />
       )}
 
       {data.unplaced?.length > 0 && (

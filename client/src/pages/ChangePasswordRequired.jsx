@@ -12,7 +12,7 @@ export default function ChangePasswordRequired() {
   const [pw, setPw] = useState('');
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
-  const min = user?.role === 'ADMIN' ? 12 : 8;
+  const min = user?.role === 'SUPER_ADMIN' ? 12 : 8;
 
   const submit = async (e) => {
     e.preventDefault();

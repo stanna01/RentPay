@@ -83,7 +83,9 @@ export function AuthProvider({ children }) {
       logout,
       logoutEverywhere,
       refresh,
-      isAdmin: user?.role === 'ADMIN',
+      // The super admin runs the platform; a landlord owns one business.
+      isSuperAdmin: user?.role === 'SUPER_ADMIN',
+      isOwner: user?.role === 'LANDLORD',
       properties,
       property,
       propertyId: property?.id ?? null,

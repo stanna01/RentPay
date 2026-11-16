@@ -1,35 +1,31 @@
-// Property-level access control. ADMINs can reach every property; LANDLORDs
-// only the properties granted to them in PropertyAccess. Every route that
-// touches a tenant, tenancy, room, payment or receipt loads it through one of
-// the helpers below, which resolve its property and check access — so an id
-// from another property behaves exactly like an id that does not exist.
+// Landlord isolation. A LANDLORD can reach only the properties of their own
+// organization (landlord business). Every route that touches a tenant,
+// tenancy, room, payment or receipt loads it through one of the helpers below,
+// which resolve its property and check access — so an id from another
+// landlord behaves exactly like an id that does not exist.
 
 import { prisma } from './db.js';
-import { isAdmin } from './auth.js';
 import { notFound, badRequest } from './httpError.js';
 
-/** Property ids the user may access, or null meaning "all" (admin). Cached per request. */
+/** Property ids of the user's organization. Cached per request. */
 export async function accessiblePropertyIds(req) {
-  if (isAdmin(req.user)) return null;
   if (!req._propertyIds) {
-    const rows = await prisma.propertyAccess.findMany({
-      where: { userId: req.user.id },
-      select: { propertyId: true },
-    });
-    req._propertyIds = rows.map((r) => r.propertyId);
+    const orgId = req.user.organizationId;
+    const rows = orgId
+      ? await prisma.property.findMany({ where: { organizationId: orgId }, select: { id: true } })
+      : [];
+    req._propertyIds = rows.map((r) => r.id);
   }
   return req._propertyIds;
 }
 
 /** Prisma `where` fragment limiting a propertyId column to what the user can see. */
 export async function propertyFilter(req) {
-  const ids = await accessiblePropertyIds(req);
-  return ids === null ? {} : { in: ids };
+  return { in: await accessiblePropertyIds(req) };
 }
 
 export async function canAccessProperty(req, propertyId) {
-  const ids = await accessiblePropertyIds(req);
-  return ids === null || ids.includes(Number(propertyId));
+  return (await accessiblePropertyIds(req)).includes(Number(propertyId));
 }
 
 export async function assertPropertyAccess(req, propertyId, what = 'Property') {
@@ -52,10 +48,10 @@ export async function resolvePropertyId(req) {
   }
   const filter = await propertyFilter(req);
   const first = await prisma.property.findFirst({
-    where: { archivedAt: null, ...(filter.in ? { id: filter } : {}) },
+    where: { archivedAt: null, id: filter },
     orderBy: { id: 'asc' },
   });
-  if (!first) throw notFound('You do not have access to any property yet. Ask an administrator.');
+  if (!first) throw notFound('You have no property yet. Add one first.');
   return first.id;
 }
 

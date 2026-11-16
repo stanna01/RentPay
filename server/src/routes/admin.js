@@ -1,5 +1,6 @@
-// Admin-only: user accounts and the audit log. Mounted behind
-// requireAuth + requirePasswordCurrent + requireRole('ADMIN').
+// Super admin only: landlord businesses, their sign-in accounts, and the
+// platform-wide audit log. Mounted behind requireAuth + requirePasswordCurrent
+// + requireRole('SUPER_ADMIN').
 
 import { Router } from 'express';
 import { prisma } from '../db.js';
@@ -7,13 +8,11 @@ import { hashPassword, ROLES } from '../auth.js';
 import { clearThrottle, lockRemainingMs } from '../loginThrottle.js';
 import { passwordProblem } from '../passwordPolicy.js';
 import { audit } from '../audit.js';
-import { parse, z, email, text, id } from '../validate.js';
+import { auditPage } from './audit.js';
+import { parse, z, email, text } from '../validate.js';
 import { badRequest, notFound, httpError } from '../httpError.js';
 
 const router = Router();
-
-const role = z.enum([ROLES.ADMIN, ROLES.LANDLORD], { error: 'Choose a valid role.' });
-const propertyIds = z.array(id()).max(500).optional();
 
 function userView(u, throttle) {
   const lockedMs = lockRemainingMs(throttle);
@@ -21,124 +20,140 @@ function userView(u, throttle) {
     id: u.id,
     email: u.email,
     name: u.name,
-    role: u.role,
     isActive: u.isActive,
     mustChangePassword: u.mustChangePassword,
     lastLoginAt: u.lastLoginAt,
-    createdAt: u.createdAt,
-    propertyIds: (u.propertyAccess || []).map((a) => a.propertyId),
     lockedUntil: lockedMs > 0 ? throttle.lockedUntil : null,
   };
 }
 
-async function loadUser(rawId) {
+async function loadLandlord(rawId) {
+  const oid = Number(rawId);
+  const org = Number.isInteger(oid) ? await prisma.organization.findUnique({ where: { id: oid } }) : null;
+  if (!org) throw notFound('Landlord not found.');
+  return org;
+}
+
+/** A landlord's sign-in account (never a super admin's). */
+async function loadLandlordUser(rawId) {
   const uid = Number(rawId);
-  const user = Number.isInteger(uid)
-    ? await prisma.user.findUnique({ where: { id: uid }, include: { propertyAccess: true } })
-    : null;
-  if (!user) throw notFound('User not found.');
+  const user = Number.isInteger(uid) ? await prisma.user.findUnique({ where: { id: uid } }) : null;
+  if (!user || user.role !== ROLES.LANDLORD) throw notFound('User not found.');
   return user;
 }
 
-/** Refuse a change that would leave no active administrator. */
-async function assertAnotherActiveAdmin(excludeUserId) {
-  const others = await prisma.user.count({
-    where: { role: ROLES.ADMIN, isActive: true, id: { not: excludeUserId } },
+const tempPasswordField = z.string({ error: 'Please set a temporary password.' });
+
+// --- Landlords ----------------------------------------------------------------
+
+/** Every landlord business with its sign-in account(s) and size. */
+router.get('/landlords', async (req, res) => {
+  const orgs = await prisma.organization.findMany({
+    include: {
+      users: { orderBy: { id: 'asc' } },
+      properties: {
+        where: { archivedAt: null },
+        select: { rooms: { where: { archivedAt: null }, select: { bedCount: true } } },
+      },
+    },
+    orderBy: { name: 'asc' },
   });
-  if (others === 0) throw httpError(409, 'There must always be at least one active administrator.');
-}
-
-async function checkPropertyIds(ids) {
-  if (!ids?.length) return;
-  const found = await prisma.property.count({ where: { id: { in: ids } } });
-  if (found !== new Set(ids).size) throw badRequest('One of the selected properties does not exist.');
-}
-
-// --- Users ------------------------------------------------------------------
-
-router.get('/users', async (req, res) => {
-  const users = await prisma.user.findMany({ include: { propertyAccess: true }, orderBy: { email: 'asc' } });
-  const throttles = await prisma.loginThrottle.findMany({ where: { email: { in: users.map((u) => u.email) } } });
-  const byEmail = new Map(throttles.map((t) => [t.email, t]));
-  res.json(users.map((u) => userView(u, byEmail.get(u.email))));
+  const emails = orgs.flatMap((o) => o.users.map((u) => u.email));
+  const [throttles, occupied] = await Promise.all([
+    prisma.loginThrottle.findMany({ where: { email: { in: emails } } }),
+    prisma.tenancy.findMany({
+      where: { moveOutDate: null, room: { archivedAt: null, property: { archivedAt: null } } },
+      select: { room: { select: { property: { select: { organizationId: true } } } } },
+    }),
+  ]);
+  const throttleBy = new Map(throttles.map((t) => [t.email, t]));
+  const occupiedBy = new Map();
+  for (const t of occupied) {
+    const oid = t.room.property.organizationId;
+    occupiedBy.set(oid, (occupiedBy.get(oid) || 0) + 1);
+  }
+  res.json(
+    orgs.map((o) => ({
+      id: o.id,
+      name: o.name,
+      isActive: o.isActive,
+      createdAt: o.createdAt,
+      propertyCount: o.properties.length,
+      bedCount: o.properties.reduce((s, p) => s + p.rooms.reduce((n, r) => n + r.bedCount, 0), 0),
+      occupiedBeds: occupiedBy.get(o.id) || 0,
+      users: o.users.map((u) => userView(u, throttleBy.get(u.email))),
+    }))
+  );
 });
 
-router.post('/users', async (req, res) => {
+/**
+ * Create a landlord business and its sign-in account in one step.
+ * Body: { name, ownerName?, ownerEmail, tempPassword }
+ */
+router.post('/landlords', async (req, res) => {
   const body = parse(
     z.object({
-      email: email(),
-      name: text().optional().default(''),
-      role,
-      propertyIds,
-      tempPassword: z.string({ error: 'Please set a temporary password.' }),
+      name: text().min(1, 'Please enter the landlord or business name.'),
+      ownerName: text().optional().default(''),
+      ownerEmail: email(),
+      tempPassword: tempPasswordField,
     }),
     req.body
   );
-  const problem = passwordProblem(body.tempPassword, { email: body.email, role: body.role });
+  const problem = passwordProblem(body.tempPassword, { email: body.ownerEmail, role: ROLES.LANDLORD });
   if (problem) throw badRequest(problem);
-  if (await prisma.user.findUnique({ where: { email: body.email } })) {
+  if (await prisma.user.findUnique({ where: { email: body.ownerEmail } })) {
     throw httpError(409, 'A user with that email already exists.');
   }
-  await checkPropertyIds(body.propertyIds);
-
-  const user = await prisma.user.create({
+  const org = await prisma.organization.create({
     data: {
-      email: body.email,
       name: body.name,
-      role: body.role,
-      passwordHash: await hashPassword(body.tempPassword),
-      mustChangePassword: true, // they must choose their own on first sign-in
-      propertyAccess: body.propertyIds?.length
-        ? { create: body.propertyIds.map((propertyId) => ({ propertyId })) }
-        : undefined,
+      users: {
+        create: {
+          email: body.ownerEmail,
+          name: body.ownerName,
+          role: ROLES.LANDLORD,
+          passwordHash: await hashPassword(body.tempPassword),
+          mustChangePassword: true, // they must choose their own on first sign-in
+        },
+      },
     },
-    include: { propertyAccess: true },
+    include: { users: true },
   });
-  await audit(req, 'user.create', { type: 'user', id: user.id, after: userView(user) });
-  res.status(201).json(userView(user));
+  await audit(req, 'landlord.create', {
+    type: 'organization',
+    id: org.id,
+    organizationId: org.id,
+    after: { name: org.name, ownerEmail: body.ownerEmail },
+  });
+  res.status(201).json({ id: org.id, name: org.name, isActive: org.isActive, users: org.users.map((u) => userView(u)) });
 });
 
-router.patch('/users/:id', async (req, res) => {
-  const user = await loadUser(req.params.id);
+/** Rename, suspend or reactivate a landlord. Suspending signs its users out at once. */
+router.patch('/landlords/:id', async (req, res) => {
+  const org = await loadLandlord(req.params.id);
   const body = parse(
-    z.object({ name: text().optional(), role: role.optional(), isActive: z.boolean().optional(), propertyIds }),
+    z.object({ name: text().min(1, 'Please enter the landlord or business name.').optional(), isActive: z.boolean().optional() }),
     req.body
   );
-  const self = user.id === req.user.id;
-  if (self && (body.role && body.role !== user.role)) throw badRequest('You cannot change your own role.');
-  if (self && body.isActive === false) throw badRequest('You cannot deactivate your own account.');
-
-  const demoting = user.role === ROLES.ADMIN && body.role && body.role !== ROLES.ADMIN;
-  const deactivating = user.isActive && body.isActive === false;
-  if (user.role === ROLES.ADMIN && (demoting || deactivating)) await assertAnotherActiveAdmin(user.id);
-  await checkPropertyIds(body.propertyIds);
-
-  const data = {};
-  if (body.name !== undefined) data.name = body.name;
-  if (body.role !== undefined) data.role = body.role;
-  if (body.isActive !== undefined) data.isActive = body.isActive;
-  // Changing what someone may do ends their current sessions.
-  if ((body.role && body.role !== user.role) || deactivating) data.tokenVersion = { increment: 1 };
-
-  const updated = await prisma.$transaction(async (tx) => {
-    if (body.propertyIds) {
-      await tx.propertyAccess.deleteMany({ where: { userId: user.id } });
-      if (body.propertyIds.length) {
-        await tx.propertyAccess.createMany({
-          data: [...new Set(body.propertyIds)].map((propertyId) => ({ userId: user.id, propertyId })),
-        });
-      }
-    }
-    return tx.user.update({ where: { id: user.id }, data, include: { propertyAccess: true } });
+  const updated = await prisma.organization.update({ where: { id: org.id }, data: body });
+  const action = body.isActive === false && org.isActive ? 'landlord.suspend' : body.isActive && !org.isActive ? 'landlord.reactivate' : 'landlord.update';
+  await audit(req, action, {
+    type: 'organization',
+    id: org.id,
+    organizationId: org.id,
+    before: { name: org.name, isActive: org.isActive },
+    after: { name: updated.name, isActive: updated.isActive },
   });
-  await audit(req, 'user.update', { type: 'user', id: user.id, before: userView(user), after: userView(updated) });
-  res.json(userView(updated));
+  res.json({ id: updated.id, name: updated.name, isActive: updated.isActive });
 });
 
-/** Admin sets a temporary password; the user must change it at next sign-in. */
+// --- Landlord sign-in accounts ------------------------------------------------------
+
+/** Set a temporary password; the user must change it at next sign-in. */
 router.post('/users/:id/reset-password', async (req, res) => {
-  const user = await loadUser(req.params.id);
-  const { tempPassword } = parse(z.object({ tempPassword: z.string({ error: 'Please set a temporary password.' }) }), req.body);
+  const user = await loadLandlordUser(req.params.id);
+  const { tempPassword } = parse(z.object({ tempPassword: tempPasswordField }), req.body);
   const problem = passwordProblem(tempPassword, { email: user.email, role: user.role });
   if (problem) throw badRequest(problem);
   await prisma.user.update({
@@ -150,68 +165,29 @@ router.post('/users/:id/reset-password', async (req, res) => {
     },
   });
   await clearThrottle(user.email);
-  await audit(req, 'user.reset_password', { type: 'user', id: user.id });
+  await audit(req, 'user.reset_password', { type: 'user', id: user.id, organizationId: user.organizationId });
   res.json({ ok: true });
 });
 
 router.post('/users/:id/unlock', async (req, res) => {
-  const user = await loadUser(req.params.id);
+  const user = await loadLandlordUser(req.params.id);
   await clearThrottle(user.email);
-  await audit(req, 'user.unlock', { type: 'user', id: user.id });
+  await audit(req, 'user.unlock', { type: 'user', id: user.id, organizationId: user.organizationId });
   res.json({ ok: true });
 });
 
 /** Sign a user out everywhere (e.g. a lost phone). */
 router.post('/users/:id/revoke-sessions', async (req, res) => {
-  const user = await loadUser(req.params.id);
+  const user = await loadLandlordUser(req.params.id);
   await prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } });
-  await audit(req, 'user.revoke_sessions', { type: 'user', id: user.id });
+  await audit(req, 'user.revoke_sessions', { type: 'user', id: user.id, organizationId: user.organizationId });
   res.json({ ok: true });
 });
 
-/**
- * Permanently delete a user account. Their past actions stay in the audit log
- * (the entry below records who they were). Prefer deactivating.
- */
-router.delete('/users/:id', async (req, res) => {
-  const user = await loadUser(req.params.id);
-  if (user.id === req.user.id) throw badRequest('You cannot delete your own account.');
-  if (user.role === ROLES.ADMIN && user.isActive) await assertAnotherActiveAdmin(user.id);
-  await audit(req, 'user.delete', { type: 'user', id: user.id, before: userView(user) });
-  await prisma.user.delete({ where: { id: user.id } });
-  res.json({ ok: true });
-});
-
-// --- Audit log (read-only) ----------------------------------------------------
+// --- Audit log (read-only, all landlords) -------------------------------------------
 
 router.get('/audit', async (req, res) => {
-  const q = parse(
-    z.object({
-      action: text(100).optional(),
-      entityType: text(50).optional(),
-      entityId: text(50).optional(),
-      userId: id().optional(),
-      page: z.coerce.number().int().min(1).max(10000).optional().default(1),
-    }),
-    req.query
-  );
-  const where = {};
-  if (q.action) where.action = { startsWith: q.action };
-  if (q.entityType) where.entityType = q.entityType;
-  if (q.entityId) where.entityId = q.entityId;
-  if (q.userId) where.userId = q.userId;
-  const PAGE = 50;
-  const [rows, total] = await Promise.all([
-    prisma.auditLog.findMany({
-      where,
-      include: { user: { select: { email: true, name: true } } },
-      orderBy: { id: 'desc' },
-      skip: (q.page - 1) * PAGE,
-      take: PAGE,
-    }),
-    prisma.auditLog.count({ where }),
-  ]);
-  res.json({ rows, total, page: q.page, pageSize: PAGE });
+  res.json(await auditPage(req.query));
 });
 
 export default router;

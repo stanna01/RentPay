@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { prisma } from '../db.js';
-import { requireRole, ROLES } from '../auth.js';
 import { ngweeToKwacha } from '../money.js';
 import { propertyFilter, assertPropertyAccess } from '../access.js';
 import { loadLedgers, unpaidMonthsFor, roomLabel, ACTIVE, VOID } from '../tenancyService.js';
@@ -23,8 +22,7 @@ async function reportScope(req) {
     await assertPropertyAccess(req, pid);
     return pid;
   }
-  const f = await propertyFilter(req);
-  return f.in ? f : undefined;
+  return propertyFilter(req);
 }
 
 // Spreadsheet apps execute cells starting with = + - @ as formulas (CSV
@@ -135,10 +133,10 @@ router.get('/arrears', async (req, res) => {
 });
 
 /**
- * GET /api/reports/voids?year=&propertyId= — admin: every voided payment with
+ * GET /api/reports/voids?year=&propertyId= — every voided payment with
  * who voided it, why, and its replacement (if it was corrected).
  */
-router.get('/voids', requireRole(ROLES.ADMIN), async (req, res) => {
+router.get('/voids', async (req, res) => {
   const year = Number(req.query.year) || new Date().getFullYear();
   const scope = await reportScope(req);
   const voided = await prisma.payment.findMany({
