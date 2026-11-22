@@ -19,6 +19,15 @@ ALTER TABLE `User` ADD COLUMN `organizationId` INTEGER NULL;
 ALTER TABLE `Property` ADD COLUMN `organizationId` INTEGER NULL;
 ALTER TABLE `AuditLog` ADD COLUMN `organizationId` INTEGER NULL;
 
+-- An earlier migration always creates a placeholder property ("My Property",
+-- code MAIN). On a fresh database it is still empty, so remove it rather than
+-- invent a landlord to own it. A placeholder that holds anything is kept.
+DELETE FROM `Property`
+WHERE `code` = 'MAIN' AND `name` = 'My Property'
+  AND NOT EXISTS (SELECT 1 FROM `Room` WHERE `Room`.`propertyId` = `Property`.`id`)
+  AND NOT EXISTS (SELECT 1 FROM `Tenant` WHERE `Tenant`.`propertyId` = `Property`.`id`)
+  AND NOT EXISTS (SELECT 1 FROM `ReceiptCounter` WHERE `ReceiptCounter`.`propertyId` = `Property`.`id`);
+
 -- Existing data (if any): everything that was there becomes the first landlord
 -- business; old ADMINs become super admins, old LANDLORDs join that business.
 INSERT INTO `Organization` (`name`, `updatedAt`)

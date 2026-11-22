@@ -26,7 +26,7 @@ before(async () => {
   prisma = new PrismaClient();
   property = await prisma.property.upsert({
     where: { code: 'ZZTEST' },
-    create: { name: 'Receipt counter test', code: 'ZZTEST' },
+    create: { name: 'Receipt counter test', code: 'ZZTEST', organization: { create: { name: 'Receipt counter test' } } },
     update: {},
   });
   await prisma.receiptCounter.deleteMany({ where: { propertyId: property.id } });
@@ -36,6 +36,7 @@ after(async () => {
   if (!prisma) return;
   await prisma.receiptCounter.deleteMany({ where: { propertyId: property.id } });
   await prisma.property.delete({ where: { id: property.id } });
+  await prisma.organization.delete({ where: { id: property.organizationId } });
   await prisma.$disconnect();
 });
 

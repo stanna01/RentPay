@@ -90,9 +90,9 @@ test('landlord is refused super-admin endpoints (403)', opts, async () => {
 });
 
 test("super admin manages the platform, not a landlord's day-to-day data (403)", opts, async () => {
-  assert.equal((await ctx.ll.get('/api/properties')).status, 403);
-  assert.equal((await ctx.ll.get(`/api/rooms?propertyId=${ctx.propA.id}`)).status, 403);
-  assert.equal((await ctx.ll.get('/api/reports/arrears')).status, 403);
+  assert.equal((await ctx.admin.get('/api/properties')).status, 403);
+  assert.equal((await ctx.admin.get(`/api/rooms?propertyId=${ctx.propA.id}`)).status, 403);
+  assert.equal((await ctx.admin.get('/api/reports/arrears')).status, 403);
   const list = await ctx.admin.get('/api/admin/landlords');
   assert.equal(list.status, 200);
   const orgA = list.body.find((o) => o.id === ctx.orgA.id);
@@ -272,9 +272,12 @@ test('CSV export neutralises spreadsheet formulas in tenant names', opts, async 
 
 test('property code is editable until a receipt carries it, and must start with a letter', opts, async () => {
   const fresh = `C${RUN}`;
-  assert.equal((await ctx.llB.patch(`/api/properties/${ctx.propB.id}`).send({ code: '2026' })).status, 400);
-  assert.equal((await ctx.llB.patch(`/api/properties/${ctx.propB.id}`).send({ code: fresh })).status, 200);
-  await ctx.llB.patch(`/api/properties/${ctx.propB.id}`).send({ code: `B${RUN}` });
+  // A new property has no receipts yet, so its code can still change.
+  const made = await ctx.llB.post('/api/properties').send({ name: 'No receipts yet', code: `E${RUN}`, roomCount: 1 });
+  assert.equal(made.status, 201, made.body.error);
+  assert.equal((await ctx.llB.patch(`/api/properties/${made.body.id}`).send({ code: '2026' })).status, 400);
+  assert.equal((await ctx.llB.patch(`/api/properties/${made.body.id}`).send({ code: fresh })).status, 200);
+  await ctx.llB.patch(`/api/properties/${made.body.id}`).send({ code: `E${RUN}` });
   // Property A has issued RCT-A…-receipts, so its code is locked.
   const locked = await ctx.ll.patch(`/api/properties/${ctx.propA.id}`).send({ code: fresh });
   assert.equal(locked.status, 409);

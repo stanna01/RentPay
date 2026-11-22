@@ -67,7 +67,14 @@ async function seedDemoLandlord() {
     org = await prisma.organization.create({ data: { name: 'Kabulonga Court (demo)' } });
     console.log('  Demo landlord created: Kabulonga Court (demo).');
   }
-  if (!(await prisma.user.findUnique({ where: { email } }))) {
+  const taken = await prisma.user.findUnique({ where: { email } });
+  if (taken && taken.organizationId !== org.id) {
+    throw new Error(
+      `The demo landlord email ${email} is already used by another account (often the super admin from ADMIN_EMAIL). ` +
+        'Set DEMO_LANDLORD_EMAIL in server/.env to a different email and seed again.'
+    );
+  }
+  if (!taken) {
     await prisma.user.create({
       data: {
         email,
