@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, qs, formatK, MONTHS } from '../api.js';
+import { api, qs, formatK } from '../api.js';
 import { Loading, EmptyState, useToast } from '../ui.jsx';
 import { useAuth } from '../auth.jsx';
 
-// Per-status styling for a bed button.
+// Per-status styling for a bed button: green = owes nothing, amber = owes
+// but nothing is late yet, red = something is past its due date.
+const OWING = { box: 'bg-partial-bg border-partial-border', chip: 'bg-partial-dot', name: 'text-partial-text' };
 const BED = {
   PAID: { box: 'bg-paid-bg border-paid-border', chip: 'bg-paid-dot', name: 'text-paid-text' },
-  PARTIAL: { box: 'bg-partial-bg border-partial-border', chip: 'bg-partial-dot', name: 'text-partial-text' },
-  DUE: { box: 'bg-due-bg border-due-border', chip: 'bg-due-dot', name: 'text-due-text' },
+  PARTIAL: OWING,
+  DUE: OWING,
+  OVERDUE: { box: 'bg-due-bg border-due-border', chip: 'bg-due-dot', name: 'text-due-text' },
   VACANT: { box: 'bg-vacant-bg border-dashed border-vacant-border', chip: 'bg-vacant-dot', name: 'text-vacant-text' },
 };
 
@@ -54,20 +57,17 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const toast = useToast();
   const { propertyId, isOwner } = useAuth();
-  const now = new Date();
-  const [month, setMonth] = useState(now.getMonth() + 1);
-  const [year, setYear] = useState(now.getFullYear());
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!propertyId) { setLoading(false); return; }
     setLoading(true);
-    api.get(`/rooms${qs({ propertyId, month, year })}`)
+    api.get(`/rooms${qs({ propertyId })}`)
       .then(setData)
       .catch((e) => toast.error(e.message))
       .finally(() => setLoading(false));
-  }, [month, year, propertyId]);
+  }, [propertyId]);
 
   const tapBed = (bed) => {
     if (bed.status === 'VACANT') navigate(`/assign/${bed.roomId}/${bed.bed}`);
@@ -85,23 +85,12 @@ export default function Dashboard() {
     );
   }
 
-  const shiftMonth = (delta) => {
-    let m = month + delta, y = year;
-    if (m < 1) { m = 12; y -= 1; }
-    if (m > 12) { m = 1; y += 1; }
-    setMonth(m);
-    setYear(y);
-  };
-
   if (loading || !data) return <Loading />;
 
   return (
     <div className="flex flex-col gap-3.5 px-3.5 pb-4 pt-3.5">
-      {/* Month context */}
-      <div className="flex items-center justify-center gap-1 text-sm">
-        <button onClick={() => shiftMonth(-1)} className="h-8 w-8 rounded-full text-muted hover:bg-white" aria-label="Previous month">‹</button>
-        <span className="w-32 text-center font-bold text-ink">{MONTHS[month - 1]} {year}</span>
-        <button onClick={() => shiftMonth(1)} className="h-8 w-8 rounded-full text-muted hover:bg-white" aria-label="Next month">›</button>
+      <div className="text-center text-[12.5px] text-muted">
+        {data.property.billingCycle === 'TERM' ? 'Billed per term' : `Billed monthly · rent due on day ${data.property.dueDay}`}
       </div>
 
       {/* Summary */}
@@ -110,9 +99,12 @@ export default function Dashboard() {
           {data.summary.occupied} <span className="text-[13px] font-medium text-muted">/ {data.summary.totalBeds}</span>
         </StatCard>
         <StatCard label="Vacant beds">{data.summary.vacant}</StatCard>
-        <StatCard label="Collected" valueClass="text-brand"><span className="text-[19px]">{formatK(data.summary.collected)}</span></StatCard>
+        <StatCard label={`Received in ${data.periodLabel}`} valueClass="text-brand"><span className="text-[19px]">{formatK(data.summary.collected)}</span></StatCard>
         <button onClick={() => navigate('/arrears')} className="text-left" aria-label="Open arrears report">
-          <StatCard label="Outstanding ›" valueClass="text-due-text"><span className="text-[19px]">{formatK(data.summary.outstanding)}</span></StatCard>
+          <StatCard label="Owed now ›" valueClass="text-due-text">
+            <span className="text-[19px]">{formatK(data.summary.outstanding)}</span>
+            {data.summary.overdue > 0 && <span className="block text-[11.5px] font-semibold">{formatK(data.summary.overdue)} overdue</span>}
+          </StatCard>
         </button>
       </div>
 
@@ -131,9 +123,9 @@ export default function Dashboard() {
 
       {/* Legend */}
       <div className="flex flex-wrap gap-x-3 gap-y-1 px-0.5 text-[11.5px] text-muted">
-        <LegendDot color="bg-paid-dot" label="Paid" />
-        <LegendDot color="bg-partial-dot" label="Partial" />
-        <LegendDot color="bg-due-dot" label="Due" />
+        <LegendDot color="bg-paid-dot" label="Paid up" />
+        <LegendDot color="bg-partial-dot" label="Owes (not late)" />
+        <LegendDot color="bg-due-dot" label="Overdue" />
         <LegendDot color="bg-vacant-dot" label="Vacant" />
       </div>
 

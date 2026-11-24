@@ -81,3 +81,27 @@ export const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
+
+/** "per month" / "per term" for a property's billing cycle. */
+export const perLabel = (cycle) => (cycle === 'TERM' ? 'per term' : 'per month');
+export const perShort = (cycle) => (cycle === 'TERM' ? '/ term' : '/ month');
+
+/** Today as "YYYY-MM-DD" in the browser's timezone. */
+export function todayDay() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** "YYYY-MM-DD" + n days. */
+export function addDaysTo(day, n) {
+  const d = new Date(`${day}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Format a date-only value "2027-01-20" as "20 Jan 2027" (no timezone shifts). */
+export function fmtDay(day) {
+  if (!day) return '';
+  const [y, m, d] = String(day).slice(0, 10).split('-').map(Number);
+  return `${d} ${MONTHS[m - 1].slice(0, 3)} ${y}`;
+}

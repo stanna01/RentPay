@@ -1,4 +1,33 @@
-# UPGRADE — Many landlords (super admin) release
+# UPGRADE — Billing release (charges, terms, notices)
+
+This release replaces "rent recalculated from calendar months" with real
+**charges**: monthly or per-term rent billed automatically, deposits and fees,
+waivers, credit, rent increases with 30 days' notice, and notices to tenants.
+
+**A fresh database is required.** The migration `20261124000000_billing` drops
+the old month-by-month payment records (`PaymentPeriod`, `ArrearsAdjustment`)
+instead of converting them, because nothing had been deployed with real
+records when it was written:
+
+```bash
+npm install
+npm run db:reset        # ⚠️ deletes everything in the database, then re-creates and seeds it
+```
+
+(`SEED_DEMO=1 npm run db:seed` afterwards adds a demo landlord with a monthly
+boarding house and a per-semester hostel.)
+
+**Do not run this release against a database with real payments** — they would
+lose their link to the months they paid. Converting old records into charges
+(plan §14) would have to be written first.
+
+Windows note: MySQL on Windows stores table names in lower case, so
+`prisma migrate diff` there reports every table as different. Write or check
+migrations against a Linux MySQL (e.g. the hosted one), not with a diff on Windows.
+
+---
+
+# Earlier: Many landlords (super admin) release
 
 This release adds landlord businesses. Roles are now **super admin** (runs the
 platform) and **landlord** (runs one business); the old per-user list of

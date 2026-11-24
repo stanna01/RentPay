@@ -66,13 +66,16 @@ export function EmptyState({ icon = '📭', title, message, action }) {
 }
 
 // --- Status badge -----------------------------------------------------------
+// Amber = owed but not late yet; red = past its due date.
 const STATUS_STYLES = {
   PAID: 'bg-paid-bg text-paid-text',
   PARTIAL: 'bg-partial-bg text-partial-text',
-  DUE: 'bg-due-bg text-due-text',
+  DUE: 'bg-partial-bg text-partial-text',
+  OVERDUE: 'bg-due-bg text-due-text',
+  CANCELLED: 'bg-vacant-bg text-vacant-text line-through',
   VACANT: 'bg-vacant-bg text-vacant-text',
 };
-const STATUS_LABEL = { PAID: 'Paid', PARTIAL: 'Partial', DUE: 'Due', VACANT: 'Vacant' };
+const STATUS_LABEL = { PAID: 'Paid', PARTIAL: 'Part-paid', DUE: 'Due', OVERDUE: 'Overdue', CANCELLED: 'Cancelled', VACANT: 'Vacant' };
 
 export function StatusBadge({ status }) {
   return (

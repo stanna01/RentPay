@@ -52,7 +52,7 @@ export async function publicUser(user) {
         prisma.organization.findUnique({ where: { id: user.organizationId }, select: { id: true, name: true } }),
         prisma.property.findMany({
           where: { organizationId: user.organizationId, archivedAt: null },
-          select: { id: true, name: true, code: true, address: true },
+          select: { id: true, name: true, code: true, address: true, billingCycle: true },
           orderBy: { id: 'asc' },
         }),
       ])

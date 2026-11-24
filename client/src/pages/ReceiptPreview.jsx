@@ -1,16 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { api, formatK, MONTHS } from '../api.js';
+import { api, formatK } from '../api.js';
 import { Loading, useToast, fmtDate } from '../ui.jsx';
-function periodText(periods) {
-  const sorted = [...periods].sort((a, b) => a.year - b.year || a.month - b.month);
-  const name = (p) => `${MONTHS[p.month - 1]} ${p.year}`;
-  if (sorted.length === 1) return name(sorted[0]);
-  const idx = (p) => p.year * 12 + p.month;
-  const consecutive = sorted.every((p, i) => i === 0 || idx(p) === idx(sorted[i - 1]) + 1);
-  if (consecutive) return `${name(sorted[0])} – ${name(sorted[sorted.length - 1])}`;
-  return sorted.map(name).join(', ');
-}
 
 function Field({ label, children, valueClass = 'text-[15.5px] font-semibold' }) {
   return (
@@ -77,14 +68,32 @@ export default function ReceiptPreview() {
 
         <div className="flex flex-col gap-3 border-b border-line py-4">
           <Field label="Received from">{r.tenant.name} — Room {r.roomLabel}</Field>
-          <Field label="Period covered">{periodText(r.periods)}</Field>
+          <Field label="Paid for" valueClass="text-[14px]">
+            {r.lines.map((l) => (
+              <div key={l.chargeId} className="flex justify-between gap-2">
+                <span className="font-semibold">{l.description}</span>
+                <span>{formatK(l.paid)}{l.balanceAfter > 0 && <span className="text-due-text"> · {formatK(l.balanceAfter)} left</span>}</span>
+              </div>
+            ))}
+            {r.amount - r.lines.reduce((s, l) => s + l.paid, 0) > 0 && (
+              <div className="flex justify-between gap-2 text-paid-text">
+                <span className="font-semibold">Kept as credit</span>
+                <span>{formatK(r.amount - r.lines.reduce((s, l) => s + l.paid, 0))}</span>
+              </div>
+            )}
+          </Field>
           <Field label="Amount received" valueClass="text-[21px] font-bold text-brand">{formatK(r.amount)}</Field>
           <Field label="Amount in words" valueClass="text-[13.5px] italic">{r.amountWords}</Field>
         </div>
 
         {r.totalBalance > 0 && (
           <div className="mt-3 rounded-lg border border-[#F2D7D0] bg-due-bg px-3.5 py-2.5 text-[13.5px] font-bold text-due-text">
-            Balance remaining: {formatK(r.totalBalance)}
+            Still owed after this payment: {formatK(r.totalBalance)}
+          </div>
+        )}
+        {r.credit > 0 && (
+          <div className="mt-3 rounded-lg border border-paid-border bg-paid-bg px-3.5 py-2.5 text-[13.5px] font-bold text-paid-text">
+            Credit held for the next bill: {formatK(r.credit)}
           </div>
         )}
 

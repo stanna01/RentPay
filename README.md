@@ -23,6 +23,11 @@ installation.
 - 🏘️ **Many landlords** — the super admin adds each landlord business; every
   landlord sees only their own properties, tenants and money.
 - 🏢 **Multiple properties** — each with its own rooms, tenants and receipt numbers.
+- 🧾 **Billing** — rent billed automatically every month or per term/semester,
+  with due dates; deposits and fees; part payments, credit and waivers; a
+  statement per tenant.
+- 📣 **Notices** — email messages to tenants, and rent increases with at least
+  30 days' notice.
 - 🛡️ **Safe records** — void/correct payments (never deleted), arrears
   waivers/charges, append-only audit log.
 - 🏠 **Room board** — every room with its beds (A/B…), colour-coded status

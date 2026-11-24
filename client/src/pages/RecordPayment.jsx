@@ -1,14 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { api, qs, formatK, toNgwee, MONTHS } from '../api.js';
-import { Loading, EmptyState, useToast } from '../ui.jsx';
+import { api, qs, formatK, toNgwee, fmtDay, perShort, todayDay } from '../api.js';
+import { Loading, EmptyState, StatusBadge, useToast } from '../ui.jsx';
 import { useAuth } from '../auth.jsx';
 
-const mk = (y, m) => `${y}-${m}`;
-const todayISO = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-};
 const METHODS = [
   { value: 'cash', label: 'Cash' },
   { value: 'mobile_money', label: 'Mobile money' },
@@ -16,39 +11,31 @@ const METHODS = [
 ];
 
 /**
- * Month-by-month owed/paid from the server's ledger (which already ignores
- * voided payments and includes waivers/charges). In correction mode the
- * payment being replaced is taken back out so its months can be re-chosen.
+ * Open charges as they will be when this payment is saved. When correcting,
+ * the money the original payment put on each charge is given back first
+ * (the server does the same when it voids the original).
  */
-function ledgerMaps(profile, correcting) {
-  const expected = new Map();
-  const applied = new Map();
-  for (const m of profile.months) {
-    expected.set(m.key, m.expected);
-    applied.set(m.key, m.applied);
-  }
-  if (correcting) {
-    for (const pd of correcting.periods) {
-      const key = mk(pd.year, pd.month);
-      applied.set(key, Math.max(0, (applied.get(key) || 0) - pd.amountApplied));
-    }
-  }
-  return { expected, applied };
+function openChargesFor(profile, correcting) {
+  const back = new Map();
+  for (const l of correcting?.lines || []) back.set(l.chargeId, (back.get(l.chargeId) || 0) + l.paid);
+  return profile.charges
+    .filter((c) => c.status !== 'CANCELLED')
+    .map((c) => ({ ...c, balance: c.balance + (back.get(c.id) || 0) }))
+    .filter((c) => c.balance > 0);
 }
 
-// 12 months centred around now (now-4 .. now+7), plus any older unpaid months.
-function monthWindow(profile) {
-  const now = new Date();
-  const out = new Map();
-  for (const u of profile?.unpaidMonths || []) {
-    out.set(mk(u.year, u.month), { month: u.month, year: u.year, key: mk(u.year, u.month) });
+/** Where the money goes: picked charges first, then the oldest due. Mirrors the server. */
+function plan(amount, open, pickedIds) {
+  const order = [...pickedIds.map((id) => open.find((c) => c.id === id)).filter(Boolean), ...open.filter((c) => !pickedIds.includes(c.id))];
+  let left = amount;
+  const lines = [];
+  for (const c of order) {
+    if (left <= 0) break;
+    const take = Math.min(left, c.balance);
+    lines.push({ id: c.id, description: c.description, take, after: c.balance - take });
+    left -= take;
   }
-  for (let i = -4; i < 8; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-    const key = mk(d.getFullYear(), d.getMonth() + 1);
-    out.set(key, { month: d.getMonth() + 1, year: d.getFullYear(), key });
-  }
-  return [...out.values()].sort((a, b) => a.year - b.year || a.month - b.month);
+  return { lines, credit: Math.max(0, left) };
 }
 
 export default function RecordPayment() {
@@ -57,22 +44,22 @@ export default function RecordPayment() {
   const { propertyId, isOwner } = useAuth();
   const [params] = useSearchParams();
   const preId = params.get('tenancyId');
-  const correctId = params.get('correct'); // admin: payment id being corrected
+  const correctId = params.get('correct'); // payment id being corrected
 
   const [options, setOptions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [tenancyId, setTenancyId] = useState('');
   const [profile, setProfile] = useState(null);
-  const [selectedKeys, setSelectedKeys] = useState([]);
+  const [picked, setPicked] = useState([]); // charge ids to pay first, in tap order
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState('cash');
-  const [datePaid, setDatePaid] = useState(todayISO());
+  const [datePaid, setDatePaid] = useState(todayDay());
   const [reason, setReason] = useState('');
   const [sendEmail, setSendEmail] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const correcting = useMemo(
-    () => (correctId && profile ? profile.payments.find((p) => String(p.id) === String(correctId)) : null),
+    () => (correctId && profile ? profile.payments.find((p) => String(p.id) === String(correctId) && p.status === 'ACTIVE') : null),
     [correctId, profile]
   );
 
@@ -87,7 +74,7 @@ export default function RecordPayment() {
       const opts = [];
       for (const room of data.rooms)
         for (const bed of room.beds)
-          if (bed.tenancyId) opts.push({ id: bed.tenancyId, label: `${bed.tenantName} — Room ${bed.roomLabel}` });
+          if (bed.tenancyId) opts.push({ id: bed.tenancyId, label: `${bed.tenantName} — Room ${bed.roomLabel}${bed.balance > 0 ? ` · owes ${formatK(bed.balance)}` : ''}` });
       setOptions(opts);
       if (preId && opts.some((o) => String(o.id) === String(preId))) pick(preId);
     }).catch((e) => toast.error(e.message)).finally(() => setLoading(false));
@@ -96,57 +83,42 @@ export default function RecordPayment() {
   const pick = async (id) => {
     setTenancyId(id);
     setProfile(null);
-    if (!id) { setSelectedKeys([]); setAmount(''); return; }
+    setPicked([]);
+    if (!id) { setAmount(''); return; }
     try {
       const p = await api.get(`/tenancies/${id}`);
       setProfile(p);
       const orig = correctId ? p.payments.find((x) => String(x.id) === String(correctId)) : null;
       if (orig) {
-        setSelectedKeys(orig.periods.map((pd) => mk(pd.year, pd.month)));
         setAmount(String(orig.amount / 100));
         setMethod(orig.method);
         setDatePaid(String(orig.datePaid).slice(0, 10));
       } else {
-        const first = p.unpaidMonths[0];
-        const now = new Date();
-        setSelectedKeys([first ? mk(first.year, first.month) : mk(now.getFullYear(), now.getMonth() + 1)]);
-        setAmount(String((first ? first.balance : p.tenancy.monthlyRent) / 100));
+        setAmount(p.owed > 0 ? String(p.owed / 100) : '');
       }
     } catch (e) { toast.error(e.message); }
   };
 
-  const window12 = useMemo(() => monthWindow(profile), [profile]);
-  const { applied, expected } = useMemo(
-    () => (profile ? ledgerMaps(profile, correcting) : { applied: new Map(), expected: new Map() }),
-    [profile, correcting]
-  );
-  const rent = profile?.tenancy.monthlyRent || 0;
-  const owedFor = (key) => Math.max(0, (expected.get(key) ?? rent) - (applied.get(key) || 0));
+  const open = useMemo(() => (profile ? openChargesFor(profile, correcting) : []), [profile, correcting]);
+  const owedNow = open.reduce((s, c) => s + c.balance, 0);
+  const amountNgwee = toNgwee(amount) ?? 0;
+  const preview = useMemo(() => plan(amountNgwee, open, picked), [amountNgwee, open, picked]);
 
-  const toggle = (key) => {
-    setSelectedKeys((prev) => {
-      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
-      // Auto-fill the amount to what the selected months still owe.
-      if (next.length) setAmount(String(next.reduce((s, k) => s + owedFor(k), 0) / 100));
+  const toggle = (c) => {
+    setPicked((prev) => {
+      const next = prev.includes(c.id) ? prev.filter((x) => x !== c.id) : [...prev, c.id];
+      if (next.length) setAmount(String(next.reduce((s, id) => s + (open.find((o) => o.id === id)?.balance || 0), 0) / 100));
+      else setAmount(owedNow > 0 ? String(owedNow / 100) : '');
       return next;
     });
   };
 
-  const amountNgwee = toNgwee(amount) ?? 0;
-  const due = selectedKeys.reduce((s, k) => s + owedFor(k), 0);
-  const showBalance = amountNgwee > 0 && selectedKeys.length > 0 && amountNgwee < due;
-  const showFull = amountNgwee > 0 && selectedKeys.length > 0 && amountNgwee >= due;
-
   const submit = async () => {
-    if (!selectedKeys.length) return toast.error('Select at least one month');
     if (amountNgwee <= 0) return toast.error('Enter the amount received');
     if (correcting && reason.trim().length < 3) return toast.error('Please give a reason for the correction.');
     setBusy(true);
     try {
-      const months = selectedKeys
-        .map((k) => { const [y, m] = k.split('-'); return { year: Number(y), month: Number(m) }; })
-        .sort((a, b) => a.year - b.year || a.month - b.month);
-      const body = { amount: amountNgwee, method, datePaid, months, sendEmail };
+      const body = { amount: amountNgwee, method, datePaid, chargeIds: picked, sendEmail };
       const res = correcting
         ? await api.post(`/payments/${correcting.id}/correct`, { ...body, reason: reason.trim() })
         : await api.post('/payments', { ...body, tenancyId: Number(tenancyId) });
@@ -187,10 +159,13 @@ export default function RecordPayment() {
         {profile && (
           <div className="flex flex-wrap gap-x-4 gap-y-1.5 rounded-[10px] bg-surface px-3.5 py-2.5 text-[13.5px] text-[#4A5A52]">
             <span><strong className="text-ink">Room:</strong> {profile.tenancy.roomLabel}</span>
-            <span><strong className="text-ink">Rent:</strong> {formatK(rent)} / month</span>
-            {profile.unpaidMonths.length > 0 && (
-              <span className="text-due-text"><strong>Owes:</strong> {formatK(profile.unpaidMonths.reduce((s, m) => s + m.balance, 0))}</span>
+            <span><strong className="text-ink">Rent:</strong> {formatK(profile.tenancy.rent)} {perShort(profile.tenancy.property.billingCycle)}</span>
+            {owedNow > 0 ? (
+              <span className="text-due-text"><strong>Owes:</strong> {formatK(owedNow)}</span>
+            ) : (
+              <span className="text-paid-text"><strong>Owes nothing</strong></span>
             )}
+            {profile.credit > 0 && <span className="text-paid-text"><strong>Credit:</strong> {formatK(profile.credit)}</span>}
           </div>
         )}
       </div>
@@ -200,25 +175,31 @@ export default function RecordPayment() {
         <div className="card flex flex-col gap-3.5 p-4">
           <div className="text-[13px] font-bold text-muted">2 · Payment details</div>
 
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-semibold">Period covered <span className="font-normal text-muted">(tap months)</span></label>
-            <div className="grid grid-cols-3 gap-1.5">
-              {window12.map((mo) => {
-                const done = owedFor(mo.key) === 0 && (expected.get(mo.key) ?? rent) > 0;
-                const sel = selectedKeys.includes(mo.key);
-                const label = `${MONTHS[mo.month - 1].slice(0, 3)} ${String(mo.year).slice(2)}`;
-                if (done && !sel)
-                  return <div key={mo.key} className="flex min-h-[46px] items-center justify-center rounded-[10px] border-[1.5px] border-[#EDF0EC] bg-[#F3F5F2] text-[13px] font-semibold text-vacant-text">{label} ✓</div>;
+          {open.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <div className="text-sm font-semibold">
+                What it pays for <span className="font-normal text-muted">(oldest first — tap to pay something else first)</span>
+              </div>
+              {open.map((c) => {
+                const order = picked.indexOf(c.id);
                 return (
-                  <button key={mo.key} type="button" onClick={() => toggle(mo.key)}
-                    className={'min-h-[46px] rounded-[10px] border-[1.5px] text-[13px] font-bold transition ' +
-                      (sel ? 'border-brand bg-brand text-white' : 'border-[#D6DCD4] bg-white font-semibold text-ink')}>
-                    {label}
+                  <button key={c.id} type="button" onClick={() => toggle(c)}
+                    className={'flex min-h-[48px] items-center gap-2.5 rounded-[10px] border-[1.5px] px-3 text-left ' +
+                      (order >= 0 ? 'border-brand bg-brand-light' : 'border-[#D6DCD4] bg-white')}>
+                    <span className={'flex h-6 w-6 flex-none items-center justify-center rounded-md text-[12px] font-bold ' + (order >= 0 ? 'bg-brand text-white' : 'border border-line text-muted')}>
+                      {order >= 0 ? order + 1 : ''}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[14px] font-semibold">{c.description}</span>
+                      <span className="block text-[12px] text-muted">Due {fmtDay(c.dueDate)}</span>
+                    </span>
+                    <span className="text-[14px] font-bold">{formatK(c.balance)}</span>
+                    <StatusBadge status={c.status} />
                   </button>
                 );
               })}
             </div>
-          </div>
+          )}
 
           <div className="flex flex-col gap-1.5">
             <label htmlFor="amt" className="text-sm font-semibold">Amount received (K)</label>
@@ -235,18 +216,29 @@ export default function RecordPayment() {
             </div>
             <div>
               <label htmlFor="date" className="field-label">Date paid</label>
-              <input id="date" type="date" className="field-input" max={todayISO()} value={datePaid} onChange={(e) => setDatePaid(e.target.value)} />
+              <input id="date" type="date" className="field-input" max={todayDay()} value={datePaid} onChange={(e) => setDatePaid(e.target.value)} />
             </div>
           </div>
 
-          {showBalance && (
-            <div className="rounded-[10px] border border-partial-border bg-partial-bg px-3.5 py-2.5 text-sm font-semibold text-partial-text">
-              Balance remaining: {formatK(Math.max(0, due - amountNgwee))}
-            </div>
-          )}
-          {showFull && (
-            <div className="rounded-[10px] border border-paid-border bg-paid-bg px-3.5 py-2.5 text-sm font-semibold text-paid-text">
-              Full payment — no balance
+          {amountNgwee > 0 && (
+            <div className="rounded-[10px] border border-line bg-surface px-3.5 py-2.5 text-[13.5px]">
+              {preview.lines.map((l) => (
+                <div key={l.id} className="flex justify-between gap-2">
+                  <span className="truncate">{l.description}</span>
+                  <span className="font-semibold">{formatK(l.take)}{l.after > 0 && <span className="font-normal text-due-text"> · {formatK(l.after)} left</span>}</span>
+                </div>
+              ))}
+              {preview.credit > 0 && (
+                <div className="flex justify-between gap-2 text-paid-text">
+                  <span>Kept as credit for the next bill</span>
+                  <span className="font-semibold">{formatK(preview.credit)}</span>
+                </div>
+              )}
+              <div className={'mt-1.5 border-t border-line pt-1.5 font-bold ' + (owedNow - (amountNgwee - preview.credit) > 0 ? 'text-due-text' : 'text-paid-text')}>
+                {owedNow - (amountNgwee - preview.credit) > 0
+                  ? `Still owed after this: ${formatK(owedNow - (amountNgwee - preview.credit))}`
+                  : 'Owes nothing after this payment'}
+              </div>
             </div>
           )}
 

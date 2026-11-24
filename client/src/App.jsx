@@ -18,6 +18,7 @@ import AdminLandlords from './pages/AdminLandlords.jsx';
 import AdminProperties from './pages/AdminProperties.jsx';
 import AdminPropertyDetail from './pages/AdminPropertyDetail.jsx';
 import AuditLog from './pages/AuditLog.jsx';
+import Notices from './pages/Notices.jsx';
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -131,7 +132,8 @@ function Shell({ children }) {
 function ManageHome() {
   const items = [
     { to: '/admin/properties', icon: '🏢', title: 'Properties & rooms', text: 'Add, edit, archive properties and their rooms' },
-    { to: '/arrears', icon: '⚠️', title: 'Arrears', text: 'Who owes what; waive or add charges' },
+    { to: '/arrears', icon: '⚠️', title: 'Arrears', text: 'Who owes what, and how much is overdue' },
+    { to: '/notices', icon: '📣', title: 'Notices to tenants', text: 'Send a message, or announce a rent increase' },
     { to: '/admin/audit', icon: '📜', title: 'Audit log', text: 'Every change, who made it and when' },
   ];
   return (
@@ -174,6 +176,7 @@ function LandlordRoutes() {
       <Route path="/receipt/:id" element={<ReceiptPreview />} />
       <Route path="/reports" element={<Reports />} />
       <Route path="/arrears" element={<ArrearsReport />} />
+      <Route path="/notices" element={<Notices />} />
       <Route path="/past" element={<PastTenants />} />
       <Route path="/settings" element={<Settings />} />
       <Route path="/admin" element={<ManageHome />} />

@@ -42,7 +42,7 @@ export default function AdminProperties() {
 
 function NewPropertyForm({ onClose, onSaved }) {
   const toast = useToast();
-  const [f, setF] = useState({ name: '', address: '', code: '', roomCount: '10', bedCount: '2', rent: '' });
+  const [f, setF] = useState({ name: '', address: '', code: '', roomCount: '10', bedCount: '2', rent: '', billingCycle: 'MONTHLY', dueDay: '5' });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
 
@@ -56,6 +56,8 @@ function NewPropertyForm({ onClose, onSaved }) {
         roomCount: Number(f.roomCount) || 0,
         bedCount: Number(f.bedCount) || 1,
         defaultRent: toNgwee(f.rent || '0') ?? 0,
+        billingCycle: f.billingCycle,
+        dueDay: Number(f.dueDay) || 5,
       });
       toast.success(`${p.name} added.`);
       onSaved(p);
@@ -72,10 +74,27 @@ function NewPropertyForm({ onClose, onSaved }) {
           <input className="field-input uppercase" maxLength={6} value={f.code} onChange={set('code')} placeholder="e.g. KC" />
           <p className="mt-1 text-xs text-muted">2–6 letters/digits, starting with a letter. Receipt numbers look like RCT-{(f.code || 'KC').toUpperCase()}-2026-0001. It can't change after the first receipt.</p>
         </div>
+        <div>
+          <label className="field-label">How rent is billed</label>
+          <div className="grid grid-cols-2 gap-2">
+            {[['MONTHLY', 'Every month'], ['TERM', 'Per term / semester']].map(([v, label]) => (
+              <button key={v} type="button" onClick={() => setF({ ...f, billingCycle: v })}
+                className={'min-h-[44px] rounded-xl text-sm font-semibold ' + (f.billingCycle === v ? 'bg-brand text-white' : 'border border-line bg-white text-muted')}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-muted">
+            {f.billingCycle === 'TERM' ? 'Add your term dates on the next screen.' : 'Rent is billed on the 1st of each month.'} This can't change once rent has been billed.
+          </p>
+        </div>
+        {f.billingCycle === 'MONTHLY' && (
+          <div><label className="field-label">Rent is due on day (1–28)</label><input className="field-input" inputMode="numeric" value={f.dueDay} onChange={set('dueDay')} /></div>
+        )}
         <div className="grid grid-cols-3 gap-3">
           <div><label className="field-label">Rooms</label><input className="field-input" inputMode="numeric" value={f.roomCount} onChange={set('roomCount')} /></div>
           <div><label className="field-label">Beds/room</label><input className="field-input" inputMode="numeric" value={f.bedCount} onChange={set('bedCount')} /></div>
-          <div><label className="field-label">Rent (K)</label><input className="field-input" inputMode="decimal" value={f.rent} onChange={set('rent')} /></div>
+          <div><label className="field-label">Rent (K) {f.billingCycle === 'TERM' ? '/ term' : '/ month'}</label><input className="field-input" inputMode="decimal" value={f.rent} onChange={set('rent')} /></div>
         </div>
         <p className="text-xs text-muted">Rooms are numbered 1, 2, 3… You can edit each room afterwards.</p>
       </div>

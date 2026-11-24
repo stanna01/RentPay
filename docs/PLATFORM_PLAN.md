@@ -31,6 +31,20 @@ still needed from you (§18).
 | Roles for now (16 Nov 2026) | **Two fixed roles:** super admin and landlord (one sign-in per landlord business). Staff accounts and editable permissions (§4) come later. |
 | Technology (16 Nov 2026) | **Keep it simple:** stay on the current JavaScript server and MySQL. TypeScript, Redis, a worker process and object storage (§3, §16) are added only when a feature truly needs them. |
 
+| Billing scope (24 Nov 2026) | **Smallest version of Phase 2:** monthly or per-term rent per property, charges (rent, deposit, fee, other), waivers, credit, statements. Left for later: sponsor shares, room types and bed records, automatic part-period amounts, deposit refunds, late fees, reminders, statement PDF/CSV, converting old records (reset instead). |
+| Rent increases and notices (24 Nov 2026) | Rent rises only with **at least 30 days' notice**, for a whole property or chosen rooms, emailed to tenants; landlords can also **email general messages** to tenants. Phone/in-app notices come with student accounts (Phase 3). |
+
+### Status (24 Nov 2026)
+
+Billing (Phase 2, smallest version) is built: `BillingTerm`, `Charge`, `Allocation`, `Waiver`,
+`RentIncrease`/`RentChange`, `Notice`/`NoticeRecipient`; payments fill chosen charges then the
+oldest due, surplus is credit; rent is billed on reads and by a timer in the web process (no
+worker). Choices made along the way: a tenant's rent can be corrected either way in the first 7
+days after move-in, later only lowered (raising needs the notice); a rent increase sets the same
+new rent for everyone it covers and skips tenants already at or above it; a cancelled rent charge
+is not billed again; the monthly/term choice is fixed once rent has been billed. All 64 tests pass
+against a local MySQL 8.4.
+
 ### Status (16 Nov 2026)
 
 Built: landlord businesses (`Organization`) with isolation between them, the super admin's

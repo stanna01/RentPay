@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, qs, formatK, MONTHS } from '../api.js';
+import { api, qs, formatK, fmtDay } from '../api.js';
 import { Loading, EmptyState, useToast } from '../ui.jsx';
 import { useAuth } from '../auth.jsx';
 
@@ -40,33 +40,36 @@ export default function ArrearsReport() {
       {!data ? (
         <Loading />
       ) : data.rows.length === 0 ? (
-        <EmptyState icon="✅" title="No arrears" message="Every tenant is paid up to this month." />
+        <EmptyState icon="✅" title="No arrears" message="Every tenant has paid everything billed so far." />
       ) : (
         <>
           <div className="card p-4">
             <div className="text-xs font-semibold uppercase tracking-wide text-muted">Total owed</div>
             <div className="mt-1 text-[28px] font-bold text-due-text">{formatK(data.totalNgwee)}</div>
-            <div className="text-xs text-muted">{data.tenantCount} tenant{data.tenantCount === 1 ? '' : 's'} · after waivers and charges</div>
+            <div className="text-xs text-muted">
+              {formatK(data.overdueNgwee)} of it overdue · {data.tenantCount} tenant{data.tenantCount === 1 ? '' : 's'} · after waivers
+            </div>
           </div>
 
           <div className="flex flex-col gap-2">
             {data.rows.map((r) => (
               <button key={r.tenancyId} onClick={() => navigate(`/tenancy/${r.tenancyId}`)} className="card flex items-center gap-3 p-3.5 text-left">
-                <span className="flex h-11 w-11 flex-none items-center justify-center rounded-xl bg-due-bg text-sm font-bold text-due-text">{r.roomLabel}</span>
+                <span className={'flex h-11 w-11 flex-none items-center justify-center rounded-xl text-sm font-bold ' + (r.overdue > 0 ? 'bg-due-bg text-due-text' : 'bg-partial-bg text-partial-text')}>{r.roomLabel}</span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-semibold text-ink">{r.tenantName}{!r.isCurrent && <span className="ml-1 text-xs text-muted">(moved out)</span>}</div>
                   <div className="text-xs text-muted">
-                    {r.months.length} month{r.months.length === 1 ? '' : 's'} · since {MONTHS[r.oldest.month - 1].slice(0, 3)} {r.oldest.year}
+                    {r.charges.length} unpaid item{r.charges.length === 1 ? '' : 's'} · oldest due {fmtDay(r.oldestDue)}
+                    {r.overdue > 0 && ` · ${formatK(r.overdue)} overdue`}
                     {scope === 'all' && ` · ${r.property.name}`}
                   </div>
                 </div>
-                <span className="font-bold text-due-text">{formatK(r.total)}</span>
+                <span className={'font-bold ' + (r.overdue > 0 ? 'text-due-text' : 'text-partial-text')}>{formatK(r.total)}</span>
               </button>
             ))}
           </div>
 
           <a href={`/api/reports/arrears${qs({ ...params, format: 'csv' })}`} className="btn-secondary w-full">⬇️ Export CSV</a>
-          {isOwner && <p className="px-1 text-xs text-muted">To waive rent or add a charge, open the tenant and tap "Adjust" on a month.</p>}
+          {isOwner && <p className="px-1 text-xs text-muted">To waive part of a charge or add one, open the tenant.</p>}
         </>
       )}
     </div>
