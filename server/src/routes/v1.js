@@ -7,7 +7,7 @@
 import { Router } from 'express';
 import { requireAuth, requireRole, ROLES, issueMobileTokens, userFromRefreshToken } from '../auth.js';
 import { accessiblePropertyIds } from '../access.js';
-import { monthSummary } from '../tenancyService.js';
+import { propertySummary } from '../billingService.js';
 import { signInWithPassword, loginLimiter } from './auth.js';
 import { forbidden, httpError } from '../httpError.js';
 
@@ -60,11 +60,14 @@ router.get('/me', requireAuth, (req, res) => res.json(meView(req.user)));
 const landlord = [requireAuth, requireRole(ROLES.LANDLORD)];
 
 router.get('/landlord/dashboard', ...landlord, async (req, res) => {
-  const now = new Date();
-  const summary = await monthSummary(await accessiblePropertyIds(req), now.getFullYear(), now.getMonth() + 1);
+  // collected = received this month; outstanding = what current tenants owe now.
+  const { periodLabel, totalBeds, occupiedBeds, collected, outstanding } = await propertySummary(await accessiblePropertyIds(req));
   res.json({
-    periodLabel: now.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }),
-    ...summary,
+    periodLabel,
+    totalBeds,
+    occupiedBeds,
+    collected,
+    outstanding,
     pendingTransfers: 0, // bank-slip payments are not built yet
   });
 });

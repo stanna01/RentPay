@@ -6,10 +6,6 @@ import { formatKwacha, amountInWords } from './money.js';
 
 const A4 = { width: 595.28, height: 841.89 }; // points
 const MARGIN = 50;
-const MONTH_NAMES = [
-  '', 'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-];
 
 function formatDate(d) {
   const date = new Date(d);
@@ -22,8 +18,8 @@ function formatDate(d) {
  * data = {
  *   receiptNumber, datePaid, propertyName, propertyAddress,
  *   tenantName, roomLabel, method, amount (ngwee),
- *   periods: [{month, year, amountApplied, expectedRent}],
- *   totalExpected (ngwee), totalBalance (ngwee)
+ *   lines: [{description, chargeAmount, paid, balanceAfter}] (ngwee),
+ *   creditAfter (ngwee), totalBalance (ngwee)
  * }
  */
 export async function buildReceiptPdf(data) {
@@ -112,30 +108,33 @@ export async function buildReceiptPdf(data) {
   y -= 15 * Math.max(1, Math.ceil(font.widthOfTextAtSize(words, 11) / (A4.width - 2 * MARGIN)));
   y -= 22;
 
-  // --- Period(s) covered table ---------------------------------------------
-  text('PERIOD COVERED', MARGIN, y, { size: 9, f: bold, color: muted });
+  // --- What was paid for ---------------------------------------------------
+  text('PAID FOR', MARGIN, y, { size: 9, f: bold, color: muted });
   y -= 18;
-  const colMonth = MARGIN;
-  const colExpected = A4.width - MARGIN - 260;
-  const colApplied = A4.width - MARGIN - 130;
+  const colDesc = MARGIN;
+  const colCharge = A4.width - MARGIN - 260;
+  const colPaid = A4.width - MARGIN - 130;
   const colBal = A4.width - MARGIN;
-  text('Month', colMonth, y, { size: 9, f: bold, color: muted });
-  rightText('Expected', colExpected + 60, y, { size: 9, f: bold, color: muted });
-  rightText('Paid', colApplied + 60, y, { size: 9, f: bold, color: muted });
-  rightText('Balance', colBal, y, { size: 9, f: bold, color: muted });
+  text('Item', colDesc, y, { size: 9, f: bold, color: muted });
+  rightText('Amount', colCharge + 60, y, { size: 9, f: bold, color: muted });
+  rightText('Paid', colPaid + 60, y, { size: 9, f: bold, color: muted });
+  rightText('Still owed', colBal, y, { size: 9, f: bold, color: muted });
   y -= 6;
   hr(y);
   y -= 16;
 
-  for (const p of data.periods) {
-    const bal = Math.max(0, (p.expectedRent || 0) - (p.amountApplied || 0));
-    text(`${MONTH_NAMES[p.month]} ${p.year}`, colMonth, y, { size: 10 });
-    rightText(formatKwacha(p.expectedRent), colExpected + 60, y, { size: 10, color: muted });
-    rightText(formatKwacha(p.amountApplied), colApplied + 60, y, { size: 10 });
-    rightText(formatKwacha(bal), colBal, y, {
-      size: 10,
-      color: bal > 0 ? rgb(0.7, 0.2, 0.15) : muted,
-    });
+  const red = rgb(0.7, 0.2, 0.15);
+  for (const l of data.lines || []) {
+    text(fitText(l.description, font, 10, colCharge - colDesc - 10), colDesc, y, { size: 10 });
+    rightText(formatKwacha(l.chargeAmount), colCharge + 60, y, { size: 10, color: muted });
+    rightText(formatKwacha(l.paid), colPaid + 60, y, { size: 10 });
+    rightText(formatKwacha(l.balanceAfter), colBal, y, { size: 10, color: l.balanceAfter > 0 ? red : muted });
+    y -= 16;
+  }
+  const kept = data.amount - (data.lines || []).reduce((sum, l) => sum + l.paid, 0);
+  if (kept > 0) {
+    text('Kept as credit for the next bill', colDesc, y, { size: 10 });
+    rightText(formatKwacha(kept), colPaid + 60, y, { size: 10 });
     y -= 16;
   }
 
@@ -144,12 +143,17 @@ export async function buildReceiptPdf(data) {
   y -= 20;
 
   // --- Totals ---------------------------------------------------------------
-  rightText('Total paid:', colApplied + 60, y, { size: 10, f: bold });
+  rightText('Total paid:', colPaid + 60, y, { size: 10, f: bold });
   rightText(formatKwacha(data.amount), colBal, y, { size: 10, f: bold });
   y -= 16;
-  const balanceColor = (data.totalBalance || 0) > 0 ? rgb(0.7, 0.2, 0.15) : accent;
-  rightText('Outstanding balance:', colApplied + 60, y, { size: 10, f: bold, color: balanceColor });
+  const balanceColor = (data.totalBalance || 0) > 0 ? red : accent;
+  rightText('Outstanding balance:', colPaid + 60, y, { size: 10, f: bold, color: balanceColor });
   rightText(formatKwacha(data.totalBalance || 0), colBal, y, { size: 10, f: bold, color: balanceColor });
+  if ((data.creditAfter || 0) > 0) {
+    y -= 16;
+    rightText('Credit held:', colPaid + 60, y, { size: 10, f: bold, color: accent });
+    rightText(formatKwacha(data.creditAfter), colBal, y, { size: 10, f: bold, color: accent });
+  }
 
   // --- Signature ------------------------------------------------------------
   const sigY = MARGIN + 60;
@@ -213,6 +217,14 @@ function methodLabel(method) {
       bank: 'Paid by: Bank',
     }[method] || `Paid by: ${method}`
   );
+}
+
+/** Shorten a string with "…" so it fits in maxWidth. */
+function fitText(str, font, size, maxWidth) {
+  let s = String(str ?? '');
+  if (font.widthOfTextAtSize(s, size) <= maxWidth) return s;
+  while (s.length > 1 && font.widthOfTextAtSize(`${s}…`, size) > maxWidth) s = s.slice(0, -1);
+  return `${s}…`;
 }
 
 function wrapText(page, str, x, y, { font, size, color, maxWidth, lineHeight }) {

@@ -27,6 +27,8 @@ import receiptsRoutes from './routes/receipts.js';
 import reportsRoutes from './routes/reports.js';
 import settingsRoutes from './routes/settings.js';
 import auditRoutes from './routes/audit.js';
+import chargesRoutes from './routes/charges.js';
+import noticesRoutes from './routes/notices.js';
 import v1Routes from './routes/v1.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -119,6 +121,8 @@ app.use('/api/payments', ...landlord, wrapAsync(paymentsRoutes));
 app.use('/api/receipts', ...landlord, wrapAsync(receiptsRoutes));
 app.use('/api/reports', ...landlord, wrapAsync(reportsRoutes));
 app.use('/api/audit', ...landlord, wrapAsync(auditRoutes));
+app.use('/api/charges', ...landlord, wrapAsync(chargesRoutes));
+app.use('/api/notices', ...landlord, wrapAsync(noticesRoutes));
 
 // Unknown API routes get a JSON 404 (never the SPA's HTML).
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));

@@ -1,14 +1,20 @@
 // Seed: the super admin (who then creates landlords in the app). With
-// SEED_DEMO=1 it also adds a demo landlord with one property of 24 rooms
-// (2 beds each = 48 beds) and a realistic set of tenants with payment history,
-// receipts and PDFs (some beds vacant, some partial, some due).
+// SEED_DEMO=1 it also adds a demo landlord with two boarding houses:
+//   * Kabulonga Court (KC) — billed monthly, 24 rooms × 2 beds, tenants with
+//     months of payment history (some beds vacant, some part-paid, some due);
+//   * Great East Hostel (GE) — billed per semester, 10 rooms × 2 beds, with
+//     terms, deposits and students who have paid all, part or nothing.
+// Payments go through the real payment service, so charges, receipts and
+// PDFs are exactly what the app would make.
 
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-import { nextReceiptNumber, ensureReceiptCounter } from '../src/receiptNumber.js';
-import { buildReceiptPdf } from '../src/pdf.js';
+import { createPayment } from '../src/paymentService.js';
+import { ensureBilling } from '../src/billingService.js';
+import { today, toDbDate, localDay } from '../src/dates.js';
 
+if (!process.env.TZ) process.env.TZ = 'Africa/Lusaka';
 const prisma = new PrismaClient();
 
 // Rent tiers by room (in ngwee): rooms 1-8 = K1,500, 9-16 = K1,800, 17-24 = K2,000.
@@ -106,66 +112,41 @@ async function seedDemoLandlord() {
   return property;
 }
 
-function ym(d) {
-  return { month: d.getMonth() + 1, year: d.getFullYear() };
+const pad = (n) => String(n).padStart(2, '0');
+const dayOf = (y, m, d) => `${y}-${pad(m)}-${pad(d)}`; // m is 1-12
+const fixDay = (y, m, d) => localDay(new Date(y, m - 1, d)); // months outside 1-12 roll over
+
+/** A demo tenant + current tenancy, billed from the move-in date. */
+async function addTenant(property, room, bed, ti, { moveIn, rent }) {
+  const name = `${FIRSTS[ti % FIRSTS.length]} ${LASTS[(ti * 7 + Math.floor(ti / 30)) % LASTS.length]}`;
+  const tenant = await prisma.tenant.create({
+    data: {
+      propertyId: property.id,
+      name,
+      phone: `+260 9${6 + (ti % 2)} ${String(200 + ((ti * 37) % 700)).padStart(3, '0')} ${String(1000 + ((ti * 613) % 9000))}`,
+      email: `${name.toLowerCase().replace(/\s+/g, '.')}@gmail.com`,
+      notes: 'seed-demo',
+    },
+  });
+  const tenancy = await prisma.tenancy.create({
+    data: { roomId: room.id, bed, tenantId: tenant.id, moveInDate: toDbDate(moveIn), rent, activeBedKey: `${room.id}-${bed}` },
+    include: { tenant: true, room: { include: { property: true } } },
+  });
+  await ensureBilling([property.id], { tenancyIds: [tenancy.id] });
+  return tenancy;
 }
 
-async function makePayment(property, room, tenancy, tenant, { amount, month, year, datePaid }) {
-  const periodRows = [
-    { month, year, amountApplied: amount, expectedRent: tenancy.monthlyRent },
-  ];
-  const receiptYear = datePaid.getFullYear();
-  await ensureReceiptCounter(prisma, property.id, receiptYear);
-  const result = await prisma.$transaction(
-    async (tx) => {
-      const { receiptNumber } = await nextReceiptNumber(tx, {
-        propertyId: property.id,
-        code: property.code,
-        year: receiptYear,
-      });
-      const payment = await tx.payment.create({
-        data: {
-          tenancyId: tenancy.id,
-          amount,
-          datePaid,
-          method: 'cash',
-          periods: { create: periodRows },
-        },
-      });
-      const receipt = await tx.receipt.create({
-        data: { paymentId: payment.id, receiptNumber, emailStatus: 'none' },
-      });
-      return { payment, receipt, receiptNumber };
-    },
-    { timeout: 20000, maxWait: 20000 }
-  );
-
-  const totalBalance = Math.max(0, tenancy.monthlyRent - amount);
-  const pdfBytes = await buildReceiptPdf({
-    receiptNumber: result.receiptNumber,
-    datePaid,
-    propertyName: property.name,
-    propertyAddress: property.address,
-    tenantName: tenant.name,
-    roomLabel: `${room.number}${tenancy.bed}`,
-    method: 'cash',
-    amount,
-    periods: periodRows,
-    totalBalance,
-  });
-  await prisma.receipt.update({
-    where: { id: result.receipt.id },
-    data: { pdf: Buffer.from(pdfBytes) },
-  });
+/** Record a cash payment on a day (never in the future). */
+async function pay(tenancy, amount, day) {
+  const on = day > today() ? today() : day;
+  await createPayment({ tenancy, amount, datePaid: toDbDate(on), method: 'cash', createdById: null });
 }
 
 async function seedTenants(property) {
-  const marker = await prisma.tenant.findFirst({ where: { notes: 'seed-demo' } });
-  if (marker) {
-    console.log('  Demo tenants already present — skipping.');
+  if (await prisma.tenant.findFirst({ where: { notes: 'seed-demo', propertyId: property.id } })) {
+    console.log(`  Demo tenants of ${property.name} already present — skipping.`);
     return;
   }
-
   const now = new Date();
   const rooms = await prisma.room.findMany({ where: { propertyId: property.id } });
   const roomByNumber = new Map(rooms.map((r) => [r.number, r]));
@@ -177,68 +158,81 @@ async function seedTenants(property) {
     for (const bed of ['A', 'B']) {
       const slot = `${roomNo}${bed}`;
       if (VACANT_BEDS.includes(slot)) continue;
-
-      const name = `${FIRSTS[ti % FIRSTS.length]} ${LASTS[(ti * 7 + Math.floor(ti / 30)) % LASTS.length]}`;
       const monthsBack = (ti % 5) + 1; // 1..5 months of history
-      const moveIn = new Date(now.getFullYear(), now.getMonth() - monthsBack, ((ti * 11) % 27) + 1);
+      const moveIn = fixDay(now.getFullYear(), now.getMonth() + 1 - monthsBack, ((ti * 11) % 27) + 1);
       const rent = rentFor(roomNo);
-
-      const tenant = await prisma.tenant.create({
-        data: {
-          propertyId: property.id,
-          name,
-          phone: `+260 9${6 + (ti % 2)} ${String(200 + (ti * 37) % 700).padStart(3, '0')} ${String(1000 + (ti * 613) % 9000)}`,
-          email: `${name.toLowerCase().replace(/\s+/g, '.')}@gmail.com`,
-          notes: 'seed-demo',
-        },
-      });
-      const tenancy = await prisma.tenancy.create({
-        data: {
-          roomId: room.id,
-          bed,
-          tenantId: tenant.id,
-          moveInDate: moveIn,
-          monthlyRent: rent,
-          activeBedKey: `${room.id}-${bed}`,
-        },
-      });
+      const tenancy = await addTenant(property, room, bed, ti, { moveIn, rent });
       occupied += 1;
 
-      // Pay each full month from move-in up to (but not including) the current month.
-      let d = new Date(moveIn.getFullYear(), moveIn.getMonth(), 1);
-      const curStart = new Date(now.getFullYear(), now.getMonth(), 1);
-      while (d < curStart) {
-        const { month, year } = ym(d);
-        await makePayment(property, room, tenancy, tenant, {
-          amount: rent,
-          month,
-          year,
-          datePaid: new Date(d.getFullYear(), d.getMonth(), 5),
-        });
-        d = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+      // Pay each month from move-in up to (but not including) the current month, on the 5th.
+      for (let back = monthsBack; back >= 1; back--) {
+        await pay(tenancy, rent, fixDay(now.getFullYear(), now.getMonth() + 1 - back, 5));
       }
-
-      // Current month per demo status.
-      const cur = ym(curStart);
-      if (PARTIAL_BEDS.includes(slot)) {
-        await makePayment(property, room, tenancy, tenant, {
-          amount: rent - 50000, // K500 short
-          month: cur.month,
-          year: cur.year,
-          datePaid: new Date(now.getFullYear(), now.getMonth(), 3),
-        });
-      } else if (!DUE_BEDS.includes(slot)) {
-        await makePayment(property, room, tenancy, tenant, {
-          amount: rent,
-          month: cur.month,
-          year: cur.year,
-          datePaid: new Date(now.getFullYear(), now.getMonth(), 3),
-        });
-      }
+      // This month, per demo status.
+      const thisMonth = fixDay(now.getFullYear(), now.getMonth() + 1, 3);
+      if (PARTIAL_BEDS.includes(slot)) await pay(tenancy, rent - 50000, thisMonth); // K500 short
+      else if (!DUE_BEDS.includes(slot)) await pay(tenancy, rent, thisMonth);
       ti += 1;
     }
   }
-  console.log(`  ${occupied} beds occupied · ${VACANT_BEDS.length} vacant · ${PARTIAL_BEDS.length} partial · ${DUE_BEDS.length} due.`);
+  console.log(`  ${property.name}: ${occupied} beds occupied · ${VACANT_BEDS.length} vacant · ${PARTIAL_BEDS.length} part-paid · ${DUE_BEDS.length} due.`);
+}
+
+/** Demo only: a boarding house billed per semester, with terms and deposits. */
+async function seedTermProperty(org) {
+  let property = await prisma.property.findFirst({ where: { organizationId: org.id, code: 'GE' } });
+  if (!property) {
+    property = await prisma.property.create({
+      data: {
+        organizationId: org.id,
+        name: 'Great East Hostel',
+        address: 'Great East Road, near UNZA, Lusaka',
+        code: 'GE',
+        billingCycle: 'TERM',
+        rooms: { create: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, bedCount: 2, defaultRent: 650000 })) },
+      },
+    });
+    console.log('  Property created: Great East Hostel (code GE, billed per semester).');
+  }
+  if (await prisma.tenant.findFirst({ where: { notes: 'seed-demo', propertyId: property.id } })) {
+    console.log('  Demo students of Great East Hostel already present — skipping.');
+    return;
+  }
+  // Two semesters a year around today: Jan–Jun and Jul–Dec.
+  const y = new Date().getFullYear();
+  const terms = [
+    { name: `Semester 1 ${y}`, startDate: dayOf(y, 1, 12), endDate: dayOf(y, 6, 26), dueDate: dayOf(y, 1, 31) },
+    { name: `Semester 2 ${y}`, startDate: dayOf(y, 7, 27), endDate: dayOf(y, 12, 18), dueDate: dayOf(y, 8, 14) },
+    { name: `Semester 1 ${y + 1}`, startDate: dayOf(y + 1, 1, 11), endDate: dayOf(y + 1, 6, 25), dueDate: dayOf(y + 1, 1, 29) },
+  ];
+  for (const t of terms) {
+    await prisma.billingTerm.create({
+      data: { propertyId: property.id, name: t.name, startDate: toDbDate(t.startDate), endDate: toDbDate(t.endDate), dueDate: toDbDate(t.dueDate) },
+    });
+  }
+  const current = terms.filter((t) => t.startDate <= today()).pop() || terms[0];
+
+  const rooms = await prisma.room.findMany({ where: { propertyId: property.id }, orderBy: { number: 'asc' } });
+  let ti = 200; // different names from Kabulonga Court
+  let n = 0;
+  for (const room of rooms) {
+    for (const bed of ['A', 'B']) {
+      if (room.number === 10) continue; // room 10 empty
+      const rent = 650000;
+      const tenancy = await addTenant(property, room, bed, ti, { moveIn: current.startDate, rent });
+      await prisma.charge.create({
+        data: { tenancyId: tenancy.id, type: 'DEPOSIT', description: 'Deposit', amount: 100000, dueDate: toDbDate(current.startDate) },
+      });
+      const paidOn = current.startDate;
+      if (n % 4 === 0) await pay(tenancy, rent + 100000, paidOn); // all paid
+      else if (n % 4 === 1) await pay(tenancy, 400000, paidOn); // part-paid
+      else if (n % 4 === 2) await pay(tenancy, rent + 100000 + 50000, paidOn); // K500 extra → credit
+      // n % 4 === 3: nothing paid (overdue once the due date passes)
+      ti += 1;
+      n += 1;
+    }
+  }
+  console.log(`  Great East Hostel: ${n} students in ${current.name}; paid in full, part-paid, in credit and unpaid.`);
 }
 
 async function main() {
@@ -248,7 +242,9 @@ async function main() {
   // Demo data is for local testing only — never seed it into a real/production
   // database. Opt in with SEED_DEMO=1.
   if (process.env.SEED_DEMO === '1') {
-    await seedTenants(await seedDemoLandlord());
+    const property = await seedDemoLandlord();
+    await seedTenants(property);
+    await seedTermProperty({ id: property.organizationId });
   } else {
     console.log('  (no demo landlord — set SEED_DEMO=1 to add one with sample data)');
   }

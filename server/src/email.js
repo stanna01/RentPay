@@ -158,21 +158,51 @@ export async function sendReceiptEmail(receiptId) {
   });
 }
 
+/** Send one notice email (a NoticeRecipient row) and mark it sent. */
+async function sendNoticeRecipientEmail(recipientId) {
+  const r = await prisma.noticeRecipient.findUnique({
+    where: { id: recipientId },
+    include: { notice: { include: { property: true } } },
+  });
+  if (!r) throw permanent('Notice not found');
+  if (!r.email) throw permanent('This tenant has no email address on file.');
+  const cfg = await resolveSmtp();
+  const transport = buildTransport(cfg);
+  await transport.sendMail({
+    from: `"${cfg.fromName}" <${cfg.fromEmail}>`,
+    to: r.email,
+    subject: r.notice.subject,
+    text: r.message,
+  });
+  await prisma.noticeRecipient.update({
+    where: { id: recipientId },
+    data: { status: 'sent', sentAt: new Date(), lastError: '' },
+  });
+}
+
 /** Mark a receipt for sending and try immediately; queue on failure. */
 export async function queueAndSend(receiptId) {
   await prisma.receipt.update({ where: { id: receiptId }, data: { emailStatus: 'pending' } });
-  await prisma.emailQueue.create({ data: { receiptId, status: 'pending' } });
-  await processQueueItem(receiptId).catch(() => {});
+  const item = await prisma.emailQueue.create({ data: { receiptId, status: 'pending' } });
+  await processQueueItem(item.id).catch(() => {});
 }
 
-async function processQueueItem(receiptId) {
-  const item = await prisma.emailQueue.findFirst({
-    where: { receiptId, status: 'pending' },
-    orderBy: { id: 'desc' },
-  });
-  if (!item) return;
+/**
+ * Queue notice emails for these recipients and start sending them in the
+ * background (a notice can go to many tenants, so the request doesn't wait).
+ */
+export async function queueNoticeEmails(recipientIds) {
+  if (!recipientIds.length) return;
+  await prisma.emailQueue.createMany({ data: recipientIds.map((id) => ({ noticeRecipientId: id, status: 'pending' })) });
+  setImmediate(() => runEmailWorkerOnce(50).catch((e) => console.error('[email worker]', e.message)));
+}
+
+async function processQueueItem(itemId) {
+  const item = await prisma.emailQueue.findUnique({ where: { id: itemId } });
+  if (!item || item.status !== 'pending') return;
   try {
-    await sendReceiptEmail(receiptId);
+    if (item.receiptId) await sendReceiptEmail(item.receiptId);
+    else if (item.noticeRecipientId) await sendNoticeRecipientEmail(item.noticeRecipientId);
     await prisma.emailQueue.update({
       where: { id: item.id },
       data: { status: 'sent', sentAt: new Date() },
@@ -181,31 +211,39 @@ async function processQueueItem(receiptId) {
     const attempts = item.attempts + 1;
     const failedForGood = attempts >= MAX_ATTEMPTS || !!err.permanent;
     const backoffMs = Math.min(60 * 60 * 1000, 1000 * 2 ** attempts); // cap 1h
+    const lastError = String(err.message || err).slice(0, 190);
     await prisma.emailQueue.update({
       where: { id: item.id },
       data: {
         attempts,
-        lastError: String(err.message || err).slice(0, 500),
+        lastError,
         status: failedForGood ? 'failed' : 'pending',
         nextRetryAt: new Date(Date.now() + backoffMs),
       },
     });
-    await prisma.receipt.update({
-      where: { id: receiptId },
-      data: { emailStatus: failedForGood ? 'failed' : 'pending' },
-    });
+    if (item.receiptId) {
+      await prisma.receipt.update({
+        where: { id: item.receiptId },
+        data: { emailStatus: failedForGood ? 'failed' : 'pending' },
+      });
+    } else if (item.noticeRecipientId) {
+      await prisma.noticeRecipient.update({
+        where: { id: item.noticeRecipientId },
+        data: { status: failedForGood ? 'failed' : 'pending', lastError },
+      });
+    }
   }
 }
 
 /** Background worker: retry any due, pending queue items. */
-export async function runEmailWorkerOnce() {
+export async function runEmailWorkerOnce(limit = 10) {
   const due = await prisma.emailQueue.findMany({
     where: { status: 'pending', nextRetryAt: { lte: new Date() } },
     orderBy: { nextRetryAt: 'asc' },
-    take: 10,
+    take: limit,
   });
   for (const item of due) {
-    await processQueueItem(item.receiptId);
+    await processQueueItem(item.id);
   }
 }
 

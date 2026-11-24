@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { prisma } from '../db.js';
 import { resolvePropertyId, loadRoom } from '../access.js';
-import { loadLedgers, bedLabels, roomLabel, mkey } from '../tenancyService.js';
-import { roomTileStatus } from '../status.js';
+import { bedLabels, roomLabel } from '../tenancyService.js';
+import { loadAccounts, accountStatus, propertySummary } from '../billingService.js';
+import { STATUS } from '../status.js';
 import { audit } from '../audit.js';
 import { parse, z } from '../validate.js';
 import { roomFields } from './properties.js';
@@ -11,16 +12,15 @@ import { badRequest, httpError } from '../httpError.js';
 const router = Router();
 
 /**
- * GET /api/rooms?propertyId=&month=&year=
- * Every active room of the property, each with its beds and derived status for
- * the given month (default: current). Summary counts are per bed.
+ * GET /api/rooms?propertyId=
+ * Every active room of the property, each bed with its tenant's standing:
+ * PAID (owes nothing), DUE, PARTIAL (part-paid) or OVERDUE (something is past
+ * its due date), or VACANT. The summary counts beds, money received this
+ * month, and what current tenants owe.
  */
 router.get('/', async (req, res) => {
   const propertyId = await resolvePropertyId(req);
-  const now = new Date();
-  const month = Number(req.query.month) || now.getMonth() + 1;
-  const year = Number(req.query.year) || now.getFullYear();
-  const key = mkey(year, month);
+  const summary = await propertySummary([propertyId]); // also bills anything now due
 
   const [property, rooms, tenancies] = await Promise.all([
     prisma.property.findUnique({ where: { id: propertyId } }),
@@ -31,30 +31,27 @@ router.get('/', async (req, res) => {
     }),
   ]);
   const byBed = new Map(tenancies.map((t) => [`${t.roomId}-${t.bed}`, t]));
-  const ledgers = await loadLedgers(tenancies);
+  const accounts = await loadAccounts(tenancies.map((t) => t.id));
 
   let totalBeds = 0;
   let occupied = 0;
-  let collected = 0;
-  let outstanding = 0;
-
   const roomTiles = rooms.map((room) => {
     const beds = bedLabels(room.bedCount).map((bed) => {
       totalBeds += 1;
       const base = { bed, roomId: room.id, roomNumber: room.number, roomLabel: roomLabel(room.number, bed), defaultRent: room.defaultRent };
       const tenancy = byBed.get(`${room.id}-${bed}`);
       if (!tenancy) {
-        return { ...base, status: 'VACANT', tenantFirstName: null, tenantName: null, tenantId: null, tenancyId: null, balance: 0 };
+        return { ...base, status: STATUS.VACANT, tenantFirstName: null, tenantName: null, tenantId: null, tenancyId: null, balance: 0, overdue: 0, credit: 0 };
       }
       occupied += 1;
-      const ledger = ledgers.get(tenancy.id);
-      const st = roomTileStatus({ hasCurrentTenancy: true, applied: ledger.paid(key), expected: ledger.expected(key) });
-      collected += st.applied;
-      outstanding += st.balance;
+      const acc = accounts.get(tenancy.id);
       return {
         ...base,
-        status: st.status,
-        balance: st.balance,
+        status: accountStatus(acc),
+        balance: acc.owed,
+        overdue: acc.overdue,
+        credit: acc.credit,
+        oldestDue: acc.oldestDue,
         tenantFirstName: tenancy.tenant.name.split(' ')[0],
         tenantName: tenancy.tenant.name,
         tenantId: tenancy.tenantId,
@@ -69,10 +66,23 @@ router.get('/', async (req, res) => {
   const unplaced = tenancies.filter((t) => !shown.has(t.id)).map((t) => ({ tenancyId: t.id, tenantName: t.tenant.name }));
 
   res.json({
-    property: { id: property.id, name: property.name, code: property.code, address: property.address },
-    month,
-    year,
-    summary: { totalBeds, occupied, vacant: totalBeds - occupied, collected, outstanding },
+    property: {
+      id: property.id,
+      name: property.name,
+      code: property.code,
+      address: property.address,
+      billingCycle: property.billingCycle,
+      dueDay: property.dueDay,
+    },
+    periodLabel: summary.periodLabel,
+    summary: {
+      totalBeds,
+      occupied,
+      vacant: totalBeds - occupied,
+      collected: summary.collected,
+      outstanding: summary.outstanding,
+      overdue: summary.overdue,
+    },
     rooms: roomTiles,
     unplaced,
   });

@@ -5,6 +5,7 @@ import { createPayment, voidPayment, METHODS } from '../paymentService.js';
 import { queueAndSend, isSmtpConfigured, notifyInBackground } from '../email.js';
 import { formatKwacha } from '../money.js';
 import { ACTIVE } from '../tenancyService.js';
+import { dbDay, localDay } from '../dates.js';
 import { audit } from '../audit.js';
 import { parse, z, id, date, reason } from '../validate.js';
 import { badRequest, httpError } from '../httpError.js';
@@ -19,17 +20,14 @@ const paymentFields = {
     .max(1_000_000_000, 'That amount is too large.'),
   datePaid: date('Please enter a valid payment date.').optional(),
   method: z.enum(METHODS).optional().default('cash'),
-  months: z
-    .array(
-      z.object({
-        month: z.coerce.number().int().min(1).max(12),
-        year: z.coerce.number().int().min(2000).max(2100),
-      }),
-      { error: 'Please select at least one month to pay for.' }
-    )
-    .min(1, 'Please select at least one month to pay for.')
-    .max(36, 'You can pay for at most 36 months at once.')
-    .refine((ms) => new Set(ms.map((m) => `${m.year}-${m.month}`)).size === ms.length, 'A month was selected twice.'),
+  // Charges to pay first, in this order. The rest of the money goes to the
+  // oldest due charges, and anything left over is kept as credit.
+  chargeIds: z
+    .array(id('Invalid charge.'))
+    .max(100, 'Too many charges selected.')
+    .refine((ids) => new Set(ids).size === ids.length, 'A charge was selected twice.')
+    .optional()
+    .default([]),
 };
 
 async function maybeEmail(receiptId, tenant, sendEmail) {
@@ -41,7 +39,7 @@ async function maybeEmail(receiptId, tenant, sendEmail) {
 
 /**
  * POST /api/payments
- * Body: { tenancyId, amount (ngwee), datePaid, method, months: [{month, year}], sendEmail }
+ * Body: { tenancyId, amount (ngwee), datePaid, method, chargeIds?: [id], sendEmail }
  */
 router.post('/', async (req, res) => {
   const body = parse(
@@ -50,7 +48,7 @@ router.post('/', async (req, res) => {
   );
   const tenancy = await loadTenancy(req, body.tenancyId);
   const datePaid = body.datePaid || new Date();
-  if (datePaid < startOfMonth(tenancy.moveInDate)) {
+  if (localDay(datePaid) < startOfMonth(tenancy.moveInDate)) {
     throw badRequest('The payment date is before this tenant moved in.');
   }
 
@@ -59,13 +57,13 @@ router.post('/', async (req, res) => {
     amount: body.amount,
     datePaid,
     method: body.method,
-    months: body.months,
+    chargeIds: body.chargeIds,
     createdById: req.user.id,
   });
   await audit(req, 'payment.create', {
     type: 'payment',
     id: result.payment.id,
-    after: { ...result.payment, receiptNumber: result.receiptNumber, periods: result.periodRows },
+    after: { ...result.payment, receiptNumber: result.receiptNumber },
   });
 
   res.status(201).json({
@@ -73,9 +71,10 @@ router.post('/', async (req, res) => {
     receiptId: result.receipt.id,
     receiptNumber: result.receiptNumber,
     amount: body.amount,
-    totalBalance: result.totalBalance,
+    totalBalance: result.balanceAfter,
+    credit: result.creditAfter,
+    lines: result.receiptLines,
     emailStatus: await maybeEmail(result.receipt.id, tenancy.tenant, body.sendEmail),
-    periods: result.periodRows,
   });
 });
 
@@ -112,7 +111,7 @@ router.post('/:id/void', async (req, res) => {
 /**
  * POST /api/payments/:id/correct — "edit" a payment. In one transaction
  * the original is voided and a replacement with a NEW receipt number is issued.
- * Body: { amount, datePaid, method, months, reason, sendEmail? }
+ * Body: { amount, datePaid, method, chargeIds?, reason, sendEmail? }
  */
 router.post('/:id/correct', async (req, res) => {
   const original = await loadPayment(req, req.params.id);
@@ -123,7 +122,7 @@ router.post('/:id/correct', async (req, res) => {
   if (original.status !== ACTIVE) throw httpError(409, 'That payment has already been voided or corrected.');
   const tenancy = await loadTenancy(req, original.tenancyId);
   const datePaid = body.datePaid || original.datePaid;
-  if (datePaid < startOfMonth(tenancy.moveInDate)) {
+  if (localDay(datePaid) < startOfMonth(tenancy.moveInDate)) {
     throw badRequest('The payment date is before this tenant moved in.');
   }
 
@@ -132,7 +131,7 @@ router.post('/:id/correct', async (req, res) => {
     amount: body.amount,
     datePaid,
     method: body.method,
-    months: body.months,
+    chargeIds: body.chargeIds,
     createdById: req.user.id,
     replaces: { paymentId: original.id, reason: body.reason, userId: req.user.id },
   });
@@ -143,7 +142,7 @@ router.post('/:id/correct', async (req, res) => {
       amount: original.amount,
       datePaid: original.datePaid,
       method: original.method,
-      periods: original.periods,
+      lines: original.receiptLines,
       receiptNumber: original.receipt?.receiptNumber,
     },
     after: {
@@ -151,7 +150,7 @@ router.post('/:id/correct', async (req, res) => {
       amount: body.amount,
       datePaid,
       method: body.method,
-      periods: result.periodRows,
+      lines: result.receiptLines,
       receiptNumber: result.receiptNumber,
       reason: body.reason,
     },
@@ -162,14 +161,15 @@ router.post('/:id/correct', async (req, res) => {
     receiptId: result.receipt.id,
     receiptNumber: result.receiptNumber,
     replacedPaymentId: original.id,
-    totalBalance: result.totalBalance,
+    totalBalance: result.balanceAfter,
+    credit: result.creditAfter,
     emailStatus: await maybeEmail(result.receipt.id, tenancy.tenant, body.sendEmail),
   });
 });
 
+/** First day of the month of a stored date-only value, as "YYYY-MM-01". */
 function startOfMonth(d) {
-  const x = new Date(d);
-  return new Date(x.getFullYear(), x.getMonth(), 1);
+  return `${dbDay(d).slice(0, 8)}01`;
 }
 
 export default router;

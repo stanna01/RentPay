@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { prisma } from '../db.js';
 import { ngweeToKwacha } from '../money.js';
-import { propertyFilter, assertPropertyAccess } from '../access.js';
-import { loadLedgers, unpaidMonthsFor, roomLabel, ACTIVE, VOID } from '../tenancyService.js';
+import { propertyFilter, assertPropertyAccess, accessiblePropertyIds } from '../access.js';
+import { roomLabel, ACTIVE, VOID } from '../tenancyService.js';
+import { ensureBilling, loadAccounts } from '../billingService.js';
+import { dbDay, formatDay } from '../dates.js';
 
 const router = Router();
 
@@ -78,12 +80,13 @@ router.get('/income', async (req, res) => {
 
 /**
  * GET /api/reports/arrears?propertyId=&includePast=1[&format=csv]
- * Every tenancy that owes money: the unpaid / part-paid months from move-in to
- * today (or move-out), after waivers and charges. Current tenants only unless
- * includePast=1.
+ * Every tenancy that owes money: its open charges (after waivers and
+ * payments), the total, how much is overdue, and the oldest due date.
+ * Current tenants only unless includePast=1.
  */
 router.get('/arrears', async (req, res) => {
   const scope = await reportScope(req);
+  await ensureBilling(typeof scope === 'number' ? [scope] : await accessiblePropertyIds(req));
   const includePast = req.query.includePast === '1';
   const tenancies = await prisma.tenancy.findMany({
     where: {
@@ -92,12 +95,12 @@ router.get('/arrears', async (req, res) => {
     },
     include: { tenant: true, room: { include: { property: true } } },
   });
-  const ledgers = await loadLedgers(tenancies);
+  const accounts = await loadAccounts(tenancies.map((t) => t.id));
 
   const rows = [];
   for (const t of tenancies) {
-    const months = unpaidMonthsFor(ledgers.get(t.id));
-    if (!months.length) continue;
+    const acc = accounts.get(t.id);
+    if (acc.owed <= 0) continue;
     rows.push({
       tenancyId: t.id,
       tenantName: t.tenant.name,
@@ -105,31 +108,36 @@ router.get('/arrears', async (req, res) => {
       property: { id: t.room.property.id, name: t.room.property.name, code: t.room.property.code },
       roomLabel: roomLabel(t.room.number, t.bed),
       isCurrent: !t.moveOutDate,
-      months: months.map((m) => ({ month: m.month, year: m.year, expected: m.expected, applied: m.applied, balance: m.balance, status: m.status })),
-      oldest: months[0],
-      total: months.reduce((s, m) => s + m.balance, 0),
+      charges: acc.charges
+        .filter((c) => c.state.balance > 0)
+        .map((c) => ({ id: c.id, description: c.description, dueDate: dbDay(c.dueDate), balance: c.state.balance, overdue: c.state.overdue })),
+      oldestDue: acc.oldestDue,
+      overdue: acc.overdue,
+      total: acc.owed,
     });
   }
   rows.sort((a, b) => b.total - a.total);
   const totalNgwee = rows.reduce((s, r) => s + r.total, 0);
+  const overdueNgwee = rows.reduce((s, r) => s + r.overdue, 0);
 
   if (req.query.format === 'csv') {
     return sendCsv(res, 'arrears.csv', [
-      ['Property', 'Room', 'Tenant', 'Phone', 'Status', 'Months owed', 'Oldest month', 'Amount owed (K)'],
+      ['Property', 'Room', 'Tenant', 'Phone', 'Status', 'Unpaid items', 'Oldest due', 'Overdue (K)', 'Amount owed (K)'],
       ...rows.map((r) => [
         r.property.name,
         r.roomLabel,
         r.tenantName,
         r.tenantPhone,
         r.isCurrent ? 'Current' : 'Moved out',
-        r.months.length,
-        `${MONTH_NAMES[r.oldest.month]} ${r.oldest.year}`,
+        r.charges.length,
+        formatDay(r.oldestDue),
+        k(r.overdue),
         k(r.total),
       ]),
-      ['Total', '', '', '', '', '', '', k(totalNgwee)],
+      ['Total', '', '', '', '', '', '', k(overdueNgwee), k(totalNgwee)],
     ]);
   }
-  res.json({ rows, totalNgwee, tenantCount: rows.length });
+  res.json({ rows, totalNgwee, overdueNgwee, tenantCount: rows.length });
 });
 
 /**

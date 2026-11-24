@@ -3,13 +3,21 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { loadRoom, loadTenancy, loadTenant, propertyFilter, assertPropertyAccess } from '../access.js';
 import { buildTenancyProfile, bedLabels, roomLabel, ACTIVE } from '../tenancyService.js';
+import { ensureBilling, syncStay, applyCredit, loadAccount, MANUAL_CHARGE_TYPES } from '../billingService.js';
+import { today, toDbDate, dbDay } from '../dates.js';
 import { audit } from '../audit.js';
-import { parse, z, text, optionalEmail, ngwee, date, id, reason } from '../validate.js';
+import { parse, z, text, optionalEmail, ngwee, day, id } from '../validate.js';
 import { badRequest, httpError, notFound } from '../httpError.js';
 
 const router = Router();
 
 const bedKey = (roomId, bed) => `${roomId}-${bed}`;
+
+// Within this many days of moving a tenant in, the rent can still be corrected
+// (a typo) in either direction; after that it can only go up with notice.
+const CORRECTION_DAYS = 7;
+const RAISE_NEEDS_NOTICE =
+  "To raise the rent, send a rent increase from Notices (tenants must get at least 30 days' notice).";
 const BED_TAKEN = 'That bed is already occupied.';
 
 /** Run a write that sets activeBedKey; a unique-constraint clash means the bed is taken. */
@@ -23,8 +31,30 @@ async function claimBed(fn) {
 }
 
 /**
+ * Fix a mistyped rent soon after move-in: rent that has not been paid yet is
+ * billed again at the new amount, as if it had been right from the start.
+ */
+async function correctRent(tenancy, newRent, userId) {
+  const account = await loadAccount(tenancy.id);
+  const auto = account.charges.filter((c) => c.type === 'RENT' && c.createdById == null && !c.cancelledAt);
+  if (auto.some((c) => c.state.paid > 0)) {
+    throw httpError(409, 'Rent has already been paid at the old amount. Void that payment first, or lower the rent instead.');
+  }
+  await prisma.$transaction([
+    ...auto.map((c) =>
+      prisma.charge.update({
+        where: { id: c.id },
+        data: { cancelledAt: new Date(), cancelledById: userId, cancelReason: 'Rent corrected', periodKey: null },
+      })
+    ),
+    prisma.rentChange.updateMany({ where: { tenancyId: tenancy.id, cancelledAt: null }, data: { cancelledAt: new Date() } }),
+  ]);
+}
+
+/**
  * POST /api/tenancies — assign a tenant to a specific bed of a room.
- * Body: { roomId, bed, tenantId?, newTenant?, monthlyRent, moveInDate }
+ * Body: { roomId, bed, tenantId?, newTenant?, rent, moveInDate } — rent is per
+ * month or per term, following the property's billing setup.
  */
 router.post('/', async (req, res) => {
   const body = parse(
@@ -40,8 +70,8 @@ router.post('/', async (req, res) => {
           notes: text().optional().default(''),
         })
         .optional(),
-      monthlyRent: ngwee('Please enter a valid monthly rent.'),
-      moveInDate: date('Please choose a valid move-in date.'),
+      rent: ngwee('Please enter a valid rent.'),
+      moveInDate: day('Please choose a valid move-in date.'),
     }),
     req.body
   );
@@ -71,8 +101,8 @@ router.post('/', async (req, res) => {
           roomId: room.id,
           bed: body.bed,
           tenantId,
-          monthlyRent: body.monthlyRent,
-          moveInDate: body.moveInDate,
+          rent: body.rent,
+          moveInDate: toDbDate(body.moveInDate),
           activeBedKey: bedKey(room.id, body.bed), // unique: blocks double-assignment
         },
         include: { tenant: true, room: true },
@@ -80,6 +110,7 @@ router.post('/', async (req, res) => {
     })
   );
   await audit(req, 'tenancy.create', { type: 'tenancy', id: tenancy.id, after: tenancy });
+  await ensureBilling([room.propertyId], { tenancyIds: [tenancy.id] }); // bill from the move-in date
   res.status(201).json({ ...tenancy, roomLabel: roomLabel(tenancy.room.number, tenancy.bed) });
 });
 
@@ -123,43 +154,62 @@ router.get('/past', async (req, res) => {
   );
 });
 
-/** POST /api/tenancies/adjustments/:adjId/reverse — undo a waiver/charge. */
-router.post('/adjustments/:adjId/reverse', async (req, res) => {
-  const adjId = Number(req.params.adjId);
-  const adj = Number.isInteger(adjId) ? await prisma.arrearsAdjustment.findUnique({ where: { id: adjId } }) : null;
-  if (!adj) throw notFound('Adjustment not found.');
-  await loadTenancy(req, adj.tenancyId); // access check
-  if (adj.reversedAt) throw httpError(409, 'That adjustment has already been reversed.');
-  const updated = await prisma.arrearsAdjustment.update({ where: { id: adj.id }, data: { reversedAt: new Date() } });
-  await audit(req, 'arrears.reverse', { type: 'tenancy', id: adj.tenancyId, before: adj, after: updated });
-  res.json(updated);
-});
-
 /** GET /api/tenancies/:id — full profile. */
 router.get('/:id', async (req, res) => {
   const tenancy = await loadTenancy(req, req.params.id);
   res.json(await buildTenancyProfile(tenancy.id));
 });
 
-/** PATCH /api/tenancies/:id — rent, move-in date, and (after move-out) the move-out date. */
+/**
+ * PATCH /api/tenancies/:id — rent, move-in date, and (after move-out) the
+ * move-out date. Rent can be corrected freely in the first CORRECTION_DAYS
+ * days (rent not yet paid is billed again at the new amount); after that it
+ * can be lowered from today, and raised only through a rent increase notice.
+ */
 router.patch('/:id', async (req, res) => {
   const tenancy = await loadTenancy(req, req.params.id);
   const body = parse(
     z.object({
-      monthlyRent: ngwee('Please enter a valid rent.').optional(),
-      moveInDate: date('Please enter a valid move-in date.').optional(),
-      moveOutDate: date('Please enter a valid move-out date.').optional(),
+      rent: ngwee('Please enter a valid rent.').optional(),
+      moveInDate: day('Please enter a valid move-in date.').optional(),
+      moveOutDate: day('Please enter a valid move-out date.').optional(),
     }),
     req.body
   );
   if (body.moveOutDate && !tenancy.moveOutDate) {
     throw badRequest('Use "Move out" to end a current tenancy.');
   }
-  const moveIn = body.moveInDate || tenancy.moveInDate;
-  const moveOut = body.moveOutDate || tenancy.moveOutDate;
+  const moveIn = body.moveInDate || dbDay(tenancy.moveInDate);
+  const moveOut = body.moveOutDate || dbDay(tenancy.moveOutDate);
   if (moveOut && moveOut < moveIn) throw badRequest('Move-out date cannot be before the move-in date.');
 
-  const updated = await prisma.tenancy.update({ where: { id: tenancy.id }, data: body });
+  const data = {};
+  if (body.moveInDate) data.moveInDate = toDbDate(body.moveInDate);
+  if (body.moveOutDate) data.moveOutDate = toDbDate(body.moveOutDate);
+  if (body.rent != null && body.rent !== tenancy.rent) {
+    const ageDays = (Date.now() - new Date(tenancy.createdAt).getTime()) / 86_400_000;
+    if (ageDays <= CORRECTION_DAYS) {
+      await correctRent(tenancy, body.rent, req.user.id);
+    } else if (body.rent > tenancy.rent) {
+      throw badRequest(RAISE_NEEDS_NOTICE);
+    } else {
+      await prisma.rentChange.create({
+        data: {
+          tenancyId: tenancy.id,
+          oldRent: tenancy.rent,
+          newRent: body.rent,
+          startsOn: toDbDate(today()),
+          createdById: req.user.id,
+          appliedAt: new Date(),
+        },
+      });
+    }
+    data.rent = body.rent;
+  }
+
+  const updated = await prisma.tenancy.update({ where: { id: tenancy.id }, data });
+  if (data.moveInDate || data.moveOutDate) await syncStay(tenancy.id, req.user.id);
+  else if (data.rent != null) await ensureBilling([tenancy.room.propertyId], { tenancyIds: [tenancy.id] });
   const { tenant, room, ...before } = tenancy;
   await audit(req, 'tenancy.update', { type: 'tenancy', id: tenancy.id, before, after: updated });
   res.json(updated);
@@ -169,13 +219,14 @@ router.patch('/:id', async (req, res) => {
 router.post('/:id/moveout', async (req, res) => {
   const tenancy = await loadTenancy(req, req.params.id);
   if (tenancy.moveOutDate) throw badRequest('This tenant has already moved out.');
-  const { moveOutDate } = parse(z.object({ moveOutDate: date().optional() }), req.body);
-  const when = moveOutDate || new Date();
-  if (when < tenancy.moveInDate) throw badRequest('Move-out date cannot be before the move-in date.');
+  const { moveOutDate } = parse(z.object({ moveOutDate: day().optional() }), req.body);
+  const when = moveOutDate || today();
+  if (when < dbDay(tenancy.moveInDate)) throw badRequest('Move-out date cannot be before the move-in date.');
   const updated = await prisma.tenancy.update({
     where: { id: tenancy.id },
-    data: { moveOutDate: when, activeBedKey: null },
+    data: { moveOutDate: toDbDate(when), activeBedKey: null },
   });
+  await syncStay(tenancy.id, req.user.id);
   await audit(req, 'tenancy.moveout', { type: 'tenancy', id: tenancy.id, after: { moveOutDate: when } });
   res.json(updated);
 });
@@ -195,6 +246,7 @@ router.post('/:id/undo-moveout', async (req, res) => {
       data: { moveOutDate: null, archivedAt: null, activeBedKey: bedKey(tenancy.roomId, tenancy.bed) },
     })
   );
+  await syncStay(tenancy.id, req.user.id);
   await audit(req, 'tenancy.undo_moveout', { type: 'tenancy', id: tenancy.id, before: { moveOutDate: tenancy.moveOutDate } });
   res.json(updated);
 });
@@ -217,29 +269,27 @@ router.post('/:id/unarchive', async (req, res) => {
 });
 
 /**
- * POST /api/tenancies/:id/adjustments — waive (negative amount) or add a
- * charge (positive amount) to one month's rent, with a required reason.
+ * POST /api/tenancies/:id/charges — add a one-off charge (deposit, fee,
+ * utilities…). Rent is billed automatically and can't be added by hand.
+ * Body: { type: DEPOSIT|FEE|OTHER, description, amount, dueDate }
  */
-router.post('/:id/adjustments', async (req, res) => {
+router.post('/:id/charges', async (req, res) => {
   const tenancy = await loadTenancy(req, req.params.id);
   const body = parse(
     z.object({
-      month: z.coerce.number().int().min(1).max(12),
-      year: z.coerce.number().int().min(2000).max(2100),
-      amount: z.coerce
-        .number()
-        .int('Amount must be whole ngwee.')
-        .refine((n) => n !== 0, 'Amount cannot be zero.')
-        .refine((n) => Math.abs(n) <= 1_000_000_000, 'Amount is too large.'),
-      reason: reason(),
+      type: z.enum(MANUAL_CHARGE_TYPES, { error: 'Please choose deposit, fee or other.' }),
+      description: text().min(1, 'Please describe the charge.'),
+      amount: ngwee('Please enter a valid amount.').refine((n) => n > 0, 'Please enter an amount greater than zero.'),
+      dueDate: day('Please choose a valid due date.'),
     }),
     req.body
   );
-  const adj = await prisma.arrearsAdjustment.create({
-    data: { tenancyId: tenancy.id, ...body, createdById: req.user.id },
+  const charge = await prisma.charge.create({
+    data: { tenancyId: tenancy.id, ...body, dueDate: toDbDate(body.dueDate), createdById: req.user.id },
   });
-  await audit(req, body.amount < 0 ? 'arrears.waive' : 'arrears.charge', { type: 'tenancy', id: tenancy.id, after: adj });
-  res.status(201).json(adj);
+  await audit(req, 'charge.create', { type: 'tenancy', id: tenancy.id, after: charge });
+  await applyCredit(tenancy.id);
+  res.status(201).json({ ...charge, dueDate: body.dueDate });
 });
 
 export default router;

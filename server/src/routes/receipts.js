@@ -3,7 +3,7 @@ import { prisma } from '../db.js';
 import { queueAndSend, isSmtpConfigured } from '../email.js';
 import { formatKwacha, amountInWords } from '../money.js';
 import { loadReceipt } from '../access.js';
-import { balanceAsAt, ensureReceiptPdf } from '../paymentService.js';
+import { ensureReceiptPdf } from '../paymentService.js';
 import { roomLabel, ACTIVE } from '../tenancyService.js';
 import { audit } from '../audit.js';
 import { badRequest, notFound } from '../httpError.js';
@@ -40,7 +40,8 @@ router.get('/:id', async (req, res) => {
     amount: p.amount,
     amountWords: amountInWords(p.amount),
     amountFormatted: formatKwacha(p.amount),
-    totalBalance: await balanceAsAt(p),
+    totalBalance: p.balanceAfter,
+    credit: p.creditAfter,
     emailStatus: receipt.emailStatus,
     emailedAt: receipt.emailedAt,
     tenant: p.tenancy.tenant,
@@ -49,7 +50,7 @@ router.get('/:id', async (req, res) => {
     bed: p.tenancy.bed,
     roomLabel: roomLabel(p.tenancy.room.number, p.tenancy.bed),
     property: { id: property.id, name: property.name, address: property.address },
-    periods: [...p.periods].sort((a, b) => a.year - b.year || a.month - b.month),
+    lines: Array.isArray(p.receiptLines) ? p.receiptLines : [],
   });
 });
 

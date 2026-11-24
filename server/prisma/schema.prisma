@@ -75,6 +75,10 @@ model Property {
   // e.g. "KC" → RCT-KC-2026-0001. Unique across the whole platform, because
   // receipt numbers must never collide between landlords.
   code           String    @unique
+  // How rent is billed: MONTHLY (on the 1st, due on dueDay) or TERM (once per
+  // BillingTerm the landlord enters). Can only change before any rent is billed.
+  billingCycle   String    @default("MONTHLY")
+  dueDay         Int       @default(5) // MONTHLY: day of the month rent is due
   archivedAt     DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
@@ -83,6 +87,9 @@ model Property {
   rooms           Room[]
   tenants         Tenant[]
   receiptCounters ReceiptCounter[]
+  terms           BillingTerm[]
+  notices         Notice[]
+  rentIncreases   RentIncrease[]
 
   @@index([organizationId])
 }
@@ -113,8 +120,9 @@ model Tenant {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
-  property  Property  @relation(fields: [propertyId], references: [id])
+  property  Property          @relation(fields: [propertyId], references: [id])
   tenancies Tenancy[]
+  notices   NoticeRecipient[]
 
   @@index([propertyId])
 }
@@ -128,16 +136,19 @@ model Tenancy {
   moveInDate   DateTime
   moveOutDate  DateTime?
   archivedAt   DateTime? // set when a moved-out tenancy is archived (hidden from lists)
-  monthlyRent  Int // ngwee, copied from room default, editable per tenancy
+  // ngwee per month or per term (the property's billingCycle). Copied from the
+  // room's default rent at move-in. Later changes are RentChange rows.
+  rent         Int
   // "roomId-bed" while current, NULL after move-out. The unique index makes it
   // impossible for two current tenancies to occupy the same bed.
   activeBedKey String?   @unique
   createdAt    DateTime  @default(now())
 
-  room        Room                @relation(fields: [roomId], references: [id])
-  tenant      Tenant              @relation(fields: [tenantId], references: [id])
+  room        Room         @relation(fields: [roomId], references: [id])
+  tenant      Tenant       @relation(fields: [tenantId], references: [id])
   payments    Payment[]
-  adjustments ArrearsAdjustment[]
+  charges     Charge[]
+  rentChanges RentChange[]
 
   @@index([roomId, bed])
   @@index([tenantId])
@@ -157,28 +168,18 @@ model Payment {
   createdById       Int?
   createdAt         DateTime  @default(now())
 
-  tenancy Tenancy         @relation(fields: [tenancyId], references: [id])
-  periods PaymentPeriod[]
-  receipt Receipt?
+  tenancy      Tenancy @relation(fields: [tenancyId], references: [id])
+  // What the receipt says, frozen when the payment is recorded:
+  // [{ chargeId, description, chargeAmount, paid, balanceAfter }]
+  receiptLines Json?
+  creditAfter  Int     @default(0) // ngwee held as credit right after this payment
+  balanceAfter Int     @default(0) // ngwee the tenant still owed right after it
+
+  allocations Allocation[]
+  receipt     Receipt?
 
   @@index([tenancyId])
   @@index([status])
-}
-
-/// How a payment is applied across one or more months.
-/// expectedRent is snapshotted so later rent changes never corrupt history.
-model PaymentPeriod {
-  id            Int @id @default(autoincrement())
-  paymentId     Int
-  month         Int // 1..12
-  year          Int
-  amountApplied Int // ngwee
-  expectedRent  Int // ngwee snapshot
-
-  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-
-  @@index([paymentId])
-  @@index([year, month])
 }
 
 model Receipt {
@@ -206,36 +207,174 @@ model ReceiptCounter {
   @@id([propertyId, year])
 }
 
-/// Admin adjustment to what a tenancy owes for one month: a negative amount
-/// waives rent, a positive amount adds a charge. Reversed, never deleted.
-model ArrearsAdjustment {
-  id          Int       @id @default(autoincrement())
-  tenancyId   Int
-  month       Int
-  year        Int
-  amount      Int // ngwee; < 0 waiver, > 0 charge
-  reason      String
-  createdById Int
-  reversedAt  DateTime?
-  createdAt   DateTime  @default(now())
+/// A term the landlord bills for (TERM properties), e.g. "Semester 1 2027".
+model BillingTerm {
+  id         Int      @id @default(autoincrement())
+  propertyId Int
+  name       String
+  startDate  DateTime @db.Date
+  endDate    DateTime @db.Date
+  dueDate    DateTime @db.Date
+  createdAt  DateTime @default(now())
 
-  tenancy Tenancy @relation(fields: [tenancyId], references: [id])
+  property Property @relation(fields: [propertyId], references: [id])
+  charges  Charge[]
 
-  @@index([tenancyId])
+  @@index([propertyId, startDate])
 }
 
-/// Outbox for receipt emails; retried by a background worker.
-model EmailQueue {
+/// One line on a tenant's bill. Rent charges are created automatically once
+/// per month or term; deposits and fees are added by the landlord. Never
+/// deleted: a wrong charge is cancelled with a reason.
+model Charge {
+  id            Int       @id @default(autoincrement())
+  tenancyId     Int
+  type          String // RENT | DEPOSIT | FEE | OTHER
+  description   String
+  amount        Int // ngwee, never changes after creation
+  dueDate       DateTime  @db.Date
+  periodStart   DateTime? @db.Date // RENT: first day of the month / term
+  // RENT: "M-2027-01" or "T-<termId>" while live, NULL once cancelled. The
+  // unique index makes it impossible to bill the same month or term twice.
+  periodKey     String?
+  termId        Int?
+  createdById   Int? // null = created automatically
+  cancelledAt   DateTime?
+  cancelledById Int?
+  cancelReason  String    @default("")
+  createdAt     DateTime  @default(now())
+
+  tenancy     Tenancy      @relation(fields: [tenancyId], references: [id])
+  term        BillingTerm? @relation(fields: [termId], references: [id])
+  allocations Allocation[]
+  waivers     Waiver[]
+
+  @@unique([tenancyId, periodKey])
+  @@index([tenancyId, dueDate])
+}
+
+/// How much of a payment went to which charge. Counts only while the payment
+/// is ACTIVE and the charge is not cancelled; otherwise the money is credit.
+model Allocation {
+  id        Int      @id @default(autoincrement())
+  paymentId Int
+  chargeId  Int
+  amount    Int // ngwee
+  createdAt DateTime @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id])
+  charge  Charge  @relation(fields: [chargeId], references: [id])
+
+  @@index([paymentId])
+  @@index([chargeId])
+}
+
+/// Part of a charge the landlord lets off, with a reason. Reversed, never deleted.
+model Waiver {
+  id           Int       @id @default(autoincrement())
+  chargeId     Int
+  amount       Int // ngwee, > 0
+  reason       String
+  createdById  Int
+  reversedAt   DateTime?
+  reversedById Int?
+  createdAt    DateTime  @default(now())
+
+  charge Charge @relation(fields: [chargeId], references: [id])
+
+  @@index([chargeId])
+}
+
+/// A rent increase announced to tenants with at least 30 days' notice, for a
+/// whole property (roomIds null) or chosen rooms. On startsOn the rooms'
+/// default rent changes too.
+model RentIncrease {
   id          Int       @id @default(autoincrement())
-  receiptId   Int
-  status      String    @default("pending") // pending | sent | failed
-  attempts    Int       @default(0)
-  lastError   String    @default("")
-  nextRetryAt DateTime  @default(now())
-  sentAt      DateTime?
+  propertyId  Int
+  roomIds     Json? // null = every room of the property
+  newRent     Int // ngwee per month or per term
+  startsOn    DateTime  @db.Date
+  noticeId    Int?
+  createdById Int
+  appliedAt   DateTime?
+  cancelledAt DateTime?
   createdAt   DateTime  @default(now())
 
-  receipt Receipt @relation(fields: [receiptId], references: [id])
+  property Property     @relation(fields: [propertyId], references: [id])
+  changes  RentChange[]
+
+  @@index([propertyId])
+}
+
+/// A change to one tenancy's rent from a date. Rent charges for periods that
+/// start on or after startsOn use newRent; charges already issued never change.
+model RentChange {
+  id             Int       @id @default(autoincrement())
+  tenancyId      Int
+  rentIncreaseId Int?
+  oldRent        Int
+  newRent        Int
+  startsOn       DateTime  @db.Date
+  createdById    Int
+  appliedAt      DateTime? // when tenancy.rent was set to newRent
+  cancelledAt    DateTime?
+  createdAt      DateTime  @default(now())
+
+  tenancy      Tenancy       @relation(fields: [tenancyId], references: [id])
+  rentIncrease RentIncrease? @relation(fields: [rentIncreaseId], references: [id])
+
+  @@index([tenancyId, startsOn])
+}
+
+/// A message sent to tenants (by email for now): a general notice, or the
+/// notice of a rent increase / its cancellation. Never edited after sending.
+model Notice {
+  id          Int      @id @default(autoincrement())
+  propertyId  Int
+  kind        String // MESSAGE | RENT_INCREASE | RENT_INCREASE_CANCELLED
+  subject     String
+  message     String   @db.Text
+  createdById Int
+  createdAt   DateTime @default(now())
+
+  property   Property          @relation(fields: [propertyId], references: [id])
+  recipients NoticeRecipient[]
+
+  @@index([propertyId, createdAt])
+}
+
+/// One tenant a notice went to, with the exact text they were sent.
+model NoticeRecipient {
+  id        Int       @id @default(autoincrement())
+  noticeId  Int
+  tenantId  Int
+  email     String    @default("") // "" = no email on file: tell them in person
+  message   String    @db.Text
+  status    String    @default("pending") // pending | sent | failed | no_email
+  sentAt    DateTime?
+  lastError String    @default("")
+
+  notice     Notice       @relation(fields: [noticeId], references: [id])
+  tenant     Tenant       @relation(fields: [tenantId], references: [id])
+  emailQueue EmailQueue[]
+
+  @@index([noticeId])
+}
+
+/// Outbox for receipt and notice emails; retried by a background worker.
+model EmailQueue {
+  id                Int       @id @default(autoincrement())
+  receiptId         Int?
+  noticeRecipientId Int?
+  status            String    @default("pending") // pending | sent | failed
+  attempts          Int       @default(0)
+  lastError         String    @default("")
+  nextRetryAt       DateTime  @default(now())
+  sentAt            DateTime?
+  createdAt         DateTime  @default(now())
+
+  receipt         Receipt?         @relation(fields: [receiptId], references: [id])
+  noticeRecipient NoticeRecipient? @relation(fields: [noticeRecipientId], references: [id])
 
   @@index([status, nextRetryAt])
 }
@@ -258,13 +397,13 @@ model AuditLog {
   userId         Int?
   organizationId Int?
   action         String
-  entityType String   @default("")
-  entityId   String   @default("")
-  before     Json?
-  after      Json?
-  ip         String   @default("")
-  userAgent  String   @default("") @db.VarChar(255)
-  createdAt  DateTime @default(now())
+  entityType     String   @default("")
+  entityId       String   @default("")
+  before         Json?
+  after          Json?
+  ip             String   @default("")
+  userAgent      String   @default("") @db.VarChar(255)
+  createdAt      DateTime @default(now())
 
   user User? @relation(fields: [userId], references: [id])
 

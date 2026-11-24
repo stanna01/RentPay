@@ -92,7 +92,7 @@ export async function loadPayment(req, rawId) {
   const payment = await prisma.payment.findUnique({
     where: { id: intId(rawId, 'Payment') },
     include: {
-      periods: true,
+      allocations: true,
       receipt: { select: { id: true, receiptNumber: true } },
       tenancy: { include: { tenant: true, room: { include: { property: true } } } },
     },
@@ -108,7 +108,6 @@ export async function loadReceipt(req, rawId) {
     include: {
       payment: {
         include: {
-          periods: true,
           tenancy: { include: { tenant: true, room: { include: { property: true } } } },
         },
       },
@@ -117,4 +116,14 @@ export async function loadReceipt(req, rawId) {
   if (!receipt) throw notFound('Receipt not found.');
   await assertPropertyAccess(req, receipt.payment.tenancy.room.propertyId, 'Receipt');
   return receipt;
+}
+
+export async function loadCharge(req, rawId) {
+  const charge = await prisma.charge.findUnique({
+    where: { id: intId(rawId, 'Charge') },
+    include: { tenancy: { include: { room: true } } },
+  });
+  if (!charge) throw notFound('Charge not found.');
+  await assertPropertyAccess(req, charge.tenancy.room.propertyId, 'Charge');
+  return charge;
 }

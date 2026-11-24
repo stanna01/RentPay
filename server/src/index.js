@@ -4,6 +4,7 @@ if (!process.env.TZ) process.env.TZ = 'Africa/Lusaka';
 import app from './app.js';
 import { prisma, ensureSettings } from './db.js';
 import { startEmailWorker } from './email.js';
+import { startBillingTimer } from './billingService.js';
 import { assertSecureConfig } from './config.js';
 import { encryptSecret, decryptSecret, needsReencrypt } from './crypto.js';
 
@@ -23,6 +24,7 @@ async function start() {
   assertSecureConfig();
   await upgradeStoredSecrets();
   startEmailWorker();
+  startBillingTimer(); // bills rent as months and terms start, even if nobody opens the app
   app.listen(PORT, () => {
     console.log(`RentReceipt server listening on http://localhost:${PORT}`);
   });

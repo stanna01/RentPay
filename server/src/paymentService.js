@@ -1,70 +1,50 @@
 // Recording, voiding and correcting payments, and keeping their receipt PDFs.
 //
 // Receipts are financial records: a payment is never deleted or rewritten.
-//   * VOID     — the payment stops counting toward balances and reports, its
-//                receipt keeps its number and gets a copy stamped VOID.
+//   * A payment is applied to the tenant's open charges: the ones the landlord
+//     picked first, then the oldest due. Anything left over is credit, used
+//     automatically on the next charge.
+//   * VOID     — the payment stops counting; its money comes off the charges
+//                it paid. Its receipt keeps its number and gets a VOID copy.
 //   * CORRECT  — in ONE transaction the original is voided and a replacement
 //                payment with a NEW receipt number is issued (replacesPaymentId).
+//   * What the receipt says (lines, balance, credit) is frozen when the payment
+//     is recorded, so a reprint always matches the original.
 
 import { prisma } from './db.js';
 import { nextReceiptNumber, ensureReceiptCounter } from './receiptNumber.js';
-import { allocatePayment } from './status.js';
-import { loadLedger, mkey, roomLabel, ACTIVE, VOID } from './tenancyService.js';
+import { ensureBilling, loadAccount, lockTenancy, allocate, applyCredit, ACTIVE, VOID } from './billingService.js';
+import { roomLabel } from './tenancyService.js';
 import { buildReceiptPdf, stampVoid } from './pdf.js';
 import { httpError, badRequest } from './httpError.js';
 
 export const METHODS = ['cash', 'mobile_money', 'bank'];
 
 /**
- * Create a payment + periods + receipt (atomic, sequential number) and its PDF.
+ * Create a payment + allocations + receipt (atomic, sequential number) and its PDF.
  *
  * @param {object} args
  * @param {object} args.tenancy   tenancy with { tenant, room: { property } }
  * @param {number} args.amount    ngwee (> 0)
  * @param {Date}   args.datePaid
  * @param {string} args.method
- * @param {Array<{month:number, year:number}>} args.months  fill order
+ * @param {number[]} [args.chargeIds]  charges to pay first, in this order
  * @param {number} args.createdById
  * @param {{paymentId:number, reason:string, userId:number}} [args.replaces]
  *        when set, that payment is voided in the same transaction (a correction)
  */
-export async function createPayment({ tenancy, amount, datePaid, method, months, createdById, replaces }) {
+export async function createPayment({ tenancy, amount, datePaid, method, chargeIds = [], createdById, replaces }) {
   if (!(amount > 0)) throw badRequest('Please enter a payment amount greater than zero.');
-  if (!months?.length) throw badRequest('Please select at least one month to pay for.');
   if (datePaid > endOfToday()) throw badRequest('The payment date cannot be in the future.');
 
-  const ledger = await loadLedger(tenancy, {
-    excludePaymentIds: replaces ? [replaces.paymentId] : [],
-  });
-
-  // Each selected month can take up to what is still owed on it.
-  const meta = months.map(({ month, year }) => {
-    const key = mkey(year, month);
-    const expected = ledger.expected(key);
-    const already = ledger.paid(key);
-    return { month, year, key, expected, already, base: ledger.baseExpected(key), room: Math.max(0, expected - already) };
-  });
-  const { periods: allocated } = allocatePayment(
-    amount,
-    meta.map((m) => ({ month: m.month, year: m.year, expectedRent: m.room }))
-  );
-  const periodRows = allocated.map((p, i) => ({
-    month: p.month,
-    year: p.year,
-    amountApplied: p.amountApplied,
-    expectedRent: meta[i].base, // snapshot of the rent (before adjustments)
-  }));
-  const totalBalance = meta.reduce(
-    (sum, m, i) => sum + Math.max(0, m.expected - (m.already + periodRows[i].amountApplied)),
-    0
-  );
-
   const property = tenancy.room.property;
+  await ensureBilling([property.id], { tenancyIds: [tenancy.id] });
   const year = datePaid.getFullYear();
   await ensureReceiptCounter(prisma, property.id, year); // outside the txn: hot path is UPDATE-only
 
   const result = await prisma.$transaction(
     async (tx) => {
+      await lockTenancy(tx, tenancy.id);
       if (replaces) {
         const voided = await tx.payment.updateMany({
           where: { id: replaces.paymentId, status: ACTIVE },
@@ -72,6 +52,30 @@ export async function createPayment({ tenancy, amount, datePaid, method, months,
         });
         if (voided.count !== 1) throw httpError(409, 'That payment has already been voided or corrected.');
       }
+
+      // Read balances inside the lock (and after any void above).
+      const account = await loadAccount(tenancy.id, tx);
+      const open = account.charges.filter((c) => c.state.balance > 0);
+      const byId = new Map(open.map((c) => [c.id, c]));
+      for (const id of chargeIds) {
+        if (!byId.has(id)) throw badRequest('One of the chosen charges is already paid or does not belong to this tenant.');
+      }
+      const order = [...chargeIds.map((id) => byId.get(id)), ...open.filter((c) => !chargeIds.includes(c.id))];
+      const { lines, leftover } = allocate(amount, order.map((c) => ({ id: c.id, balance: c.state.balance })));
+
+      const receiptLines = lines.map((l) => {
+        const c = byId.get(l.chargeId);
+        return {
+          chargeId: c.id,
+          description: c.description,
+          chargeAmount: c.state.net,
+          paid: l.amount,
+          balanceAfter: c.state.balance - l.amount,
+        };
+      });
+      const balanceAfter = account.owed - (amount - leftover);
+      const creditAfter = account.credit + leftover;
+
       const { receiptNumber } = await nextReceiptNumber(tx, { propertyId: property.id, code: property.code, year });
       const payment = await tx.payment.create({
         data: {
@@ -81,13 +85,18 @@ export async function createPayment({ tenancy, amount, datePaid, method, months,
           method,
           createdById,
           replacesPaymentId: replaces?.paymentId ?? null,
-          periods: { create: periodRows },
+          receiptLines,
+          balanceAfter,
+          creditAfter,
         },
       });
+      if (lines.length) {
+        await tx.allocation.createMany({ data: lines.map((l) => ({ paymentId: payment.id, chargeId: l.chargeId, amount: l.amount })) });
+      }
       const receipt = await tx.receipt.create({
         data: { paymentId: payment.id, receiptNumber, emailStatus: 'none' },
       });
-      return { payment, receipt, receiptNumber };
+      return { payment, receipt, receiptNumber, receiptLines, balanceAfter, creditAfter };
     },
     { timeout: 20000, maxWait: 20000 }
   );
@@ -95,29 +104,20 @@ export async function createPayment({ tenancy, amount, datePaid, method, months,
   // Build the PDF once and store it. If this fails the receipt still exists and
   // ensureReceiptPdf() will build it the first time it is needed.
   try {
-    const bytes = await buildReceiptPdf({
-      receiptNumber: result.receiptNumber,
-      datePaid: result.payment.datePaid,
-      propertyName: property.name,
-      propertyAddress: property.address,
-      tenantName: tenancy.tenant.name,
-      roomLabel: roomLabel(tenancy.room.number, tenancy.bed),
-      method,
-      amount,
-      periods: periodRows,
-      totalBalance,
-    });
+    const bytes = await buildReceiptPdf(receiptPdfData(result.payment, result.receiptNumber, tenancy));
     await prisma.receipt.update({ where: { id: result.receipt.id }, data: { pdf: Buffer.from(bytes) } });
   } catch (e) {
     console.error('[receipt] PDF build failed, will retry on demand:', e.message);
   }
 
   if (replaces) await stampVoidReceipt(replaces.paymentId, result.receiptNumber);
+  // A correction may have freed money from the original that other charges can use.
+  if (replaces) await applyCredit(tenancy.id);
 
-  return { ...result, periodRows, totalBalance };
+  return result;
 }
 
-/** Void an ACTIVE payment (admin). Throws 409 if it is already void. */
+/** Void an ACTIVE payment. Throws 409 if it is already void. */
 export async function voidPayment({ paymentId, reason, userId }) {
   const voided = await prisma.payment.updateMany({
     where: { id: paymentId, status: ACTIVE },
@@ -125,6 +125,9 @@ export async function voidPayment({ paymentId, reason, userId }) {
   });
   if (voided.count !== 1) throw httpError(409, 'That payment has already been voided.');
   await stampVoidReceipt(paymentId, null);
+  // The charges it paid are open again; credit from other payments may cover them.
+  const p = await prisma.payment.findUnique({ where: { id: paymentId }, select: { tenancyId: true } });
+  await applyCredit(p.tenancyId);
 }
 
 /** Store a VOID-stamped copy of a voided payment's receipt. Best effort. */
@@ -145,46 +148,21 @@ async function stampVoidReceipt(paymentId, replacedBy) {
   }
 }
 
-/**
- * Outstanding balance "as at" a payment for the months it covered: rent owed
- * (snapshot + adjustments) minus everything paid for those months by this
- * payment and the ACTIVE payments recorded before it.
- */
-export async function balanceAsAt(payment) {
-  if (!payment.periods.length) return 0;
-  const months = payment.periods.map((p) => ({ month: p.month, year: p.year }));
-  const [earlier, adjustments] = await Promise.all([
-    prisma.paymentPeriod.findMany({
-      where: {
-        OR: months,
-        payment: { tenancyId: payment.tenancyId, status: ACTIVE, id: { lt: payment.id } },
-      },
-      select: { month: true, year: true, amountApplied: true },
-    }),
-    prisma.arrearsAdjustment.findMany({
-      where: { tenancyId: payment.tenancyId, reversedAt: null, OR: months },
-      select: { month: true, year: true, amount: true },
-    }),
-  ]);
-  const paid = new Map();
-  for (const p of [...earlier, ...payment.periods]) {
-    const k = mkey(p.year, p.month);
-    paid.set(k, (paid.get(k) || 0) + p.amountApplied);
-  }
-  const adj = new Map();
-  for (const a of adjustments) {
-    const k = mkey(a.year, a.month);
-    adj.set(k, (adj.get(k) || 0) + a.amount);
-  }
-  const seen = new Set();
-  let total = 0;
-  for (const p of payment.periods) {
-    const k = mkey(p.year, p.month);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    total += Math.max(0, Math.max(0, p.expectedRent + (adj.get(k) || 0)) - (paid.get(k) || 0));
-  }
-  return total;
+/** What the receipt PDF shows, from the payment's frozen receipt text. */
+function receiptPdfData(payment, receiptNumber, tenancy) {
+  return {
+    receiptNumber,
+    datePaid: payment.datePaid,
+    propertyName: tenancy.room.property.name,
+    propertyAddress: tenancy.room.property.address,
+    tenantName: tenancy.tenant.name,
+    roomLabel: roomLabel(tenancy.room.number, tenancy.bed),
+    method: payment.method,
+    amount: payment.amount,
+    lines: Array.isArray(payment.receiptLines) ? payment.receiptLines : [],
+    creditAfter: payment.creditAfter,
+    totalBalance: payment.balanceAfter,
+  };
 }
 
 /**
@@ -194,27 +172,12 @@ export async function balanceAsAt(payment) {
 export async function ensureReceiptPdf(receiptId) {
   const receipt = await prisma.receipt.findUnique({
     where: { id: receiptId },
-    include: {
-      payment: {
-        include: { periods: true, tenancy: { include: { tenant: true, room: { include: { property: true } } } } },
-      },
-    },
+    include: { payment: { include: { tenancy: { include: { tenant: true, room: { include: { property: true } } } } } } },
   });
   if (!receipt) return null;
   if (receipt.pdf) return Buffer.from(receipt.pdf);
   const p = receipt.payment;
-  const bytes = await buildReceiptPdf({
-    receiptNumber: receipt.receiptNumber,
-    datePaid: p.datePaid,
-    propertyName: p.tenancy.room.property.name,
-    propertyAddress: p.tenancy.room.property.address,
-    tenantName: p.tenancy.tenant.name,
-    roomLabel: roomLabel(p.tenancy.room.number, p.tenancy.bed),
-    method: p.method,
-    amount: p.amount,
-    periods: [...p.periods].sort((a, b) => a.year - b.year || a.month - b.month),
-    totalBalance: await balanceAsAt(p),
-  });
+  const bytes = await buildReceiptPdf(receiptPdfData(p, receipt.receiptNumber, p.tenancy));
   const buf = Buffer.from(bytes);
   // Only fill an empty slot, so two concurrent requests can't overwrite each other.
   await prisma.receipt.updateMany({ where: { id: receiptId, pdf: null }, data: { pdf: buf } });

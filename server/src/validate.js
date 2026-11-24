@@ -3,6 +3,7 @@
 
 import { z } from 'zod';
 import { badRequest } from './httpError.js';
+import { isDay } from './dates.js';
 
 export { z };
 
@@ -41,3 +42,11 @@ export const id = (msg = 'Invalid id.') => z.coerce.number().int(msg).positive(m
 
 export const reason = () =>
   z.string({ error: 'Please give a reason.' }).trim().min(3, 'Please give a reason (at least 3 characters).').max(191, 'Please keep the reason under 191 characters.');
+
+/** A calendar day as "YYYY-MM-DD" (kept as a string; see dates.js). */
+export const day = (msg = 'Please enter a valid date.') =>
+  z
+    .string({ error: msg })
+    .trim()
+    .transform((v) => v.slice(0, 10))
+    .refine((v) => isDay(v) && v >= '2000-01-01' && v <= '2100-12-31', msg);
